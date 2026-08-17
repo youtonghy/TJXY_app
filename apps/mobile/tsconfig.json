@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "jsx": "react-jsx",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "module": "ESNext",
+    "target": "ES2022",
+    "paths": {
+      "@tjxy/client-api": [
+        "../../packages/client-api/src/index.ts"
+      ]
+    }
+  },
+  "include": [
+    "**/*.ts",
+    "**/*.tsx"
+  ],
+  "extends": "expo/tsconfig.base"
+}

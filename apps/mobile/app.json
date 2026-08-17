@@ -1,0 +1,43 @@
+{
+  "expo": {
+    "name": "TJXY",
+    "slug": "tjxy",
+    "scheme": "tjxy",
+    "version": "0.1.0",
+    "orientation": "default",
+    "userInterfaceStyle": "automatic",
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "expo-video",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "允许 TJXY 使用相机扫描登录二维码",
+          "recordAudioAndroid": false
+        }
+      ],
+      "expo-status-bar",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
+    ],
+    "android": {
+      "package": "com.tjxy.app"
+    },
+    "ios": {
+      "bundleIdentifier": "com.tjxy.app",
+      "infoPlist": {
+        "NSCameraUsageDescription": "TJXY 使用相机扫描其他设备上的登录二维码。",
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": true
+        }
+      }
+    }
+  }
+}

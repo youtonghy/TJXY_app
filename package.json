@@ -1,0 +1,10 @@
+{
+  "name": "tjxy-app",
+  "private": true,
+  "packageManager": "pnpm@10.14.0",
+  "scripts": {
+    "mobile": "pnpm --filter mobile start",
+    "desktop": "pnpm --filter desktop dev",
+    "test": "pnpm --filter @tjxy/client-api test"
+  }
+}

@@ -1,0 +1,7 @@
+packages:
+  - 'apps/*'
+  - 'packages/*'
+
+allowBuilds:
+  "heroui-native-pro": true
+  "@zowe/secrets-for-zowe-sdk": true

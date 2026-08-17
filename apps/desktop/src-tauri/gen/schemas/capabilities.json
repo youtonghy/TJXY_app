@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"TJXY desktop capabilities","local":true,"windows":["main"],"permissions":["core:default",{"identifier":"http:default","allow":[{"url":"http://*:*/*"},{"url":"https://*:*/*"}]}]}}
