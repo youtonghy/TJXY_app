@@ -75,6 +75,12 @@ the supported SDK/runtime combination.
 
 ## Desktop
 
+Desktop Release CI is started from GitHub Actions via `Release Desktop` > `Run workflow`.
+Enter a SemVer version such as `1.2.3`; the workflow builds Windows x86_64/ARM64,
+macOS Apple Silicon, and Linux x86_64/ARM64 AppImage and DEB packages. Release builds
+require the `HEROUI_KEY` repository secret from the sibling `TJXY` frontend repository.
+The generated installers are currently unsigned.
+
 ```sh
 cd ../TJXY/admin
 pnpm install

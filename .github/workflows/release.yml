@@ -1,0 +1,198 @@
+name: Release Desktop
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to publish, for example 1.2.3 or v1.2.3
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: 22.22.3
+  RUST_VERSION: 1.88.0
+
+jobs:
+  validate:
+    name: Validate release version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      source_sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Normalize version
+        id: version
+        env:
+          RELEASE_INPUT: ${{ inputs.version }}
+        shell: bash
+        run: |
+          version="${RELEASE_INPUT#v}"
+          if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$'; then
+            echo 'Version must be semantic, for example 1.2.3 or v1.2.3.' >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+      - name: Pin release source
+        id: source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  frontend:
+    name: Build frontend
+    needs: validate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          path: TJXY_app
+      - uses: actions/checkout@v6
+        with:
+          repository: youtonghy/TJXY
+          ref: main
+          path: TJXY
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: TJXY/admin/package-lock.json
+      - name: Install frontend dependencies
+        run: npm --prefix TJXY/admin ci
+      - name: Configure HeroUI Pro
+        working-directory: TJXY/admin
+        env:
+          HEROUI_KEY: ${{ secrets.HEROUI_KEY }}
+        run: |
+          if [ -z "$HEROUI_KEY" ]; then
+            echo 'Repository secret HEROUI_KEY is required for release builds.' >&2
+            exit 1
+          fi
+          npx -y hpsetup@latest --auto
+      - name: Typecheck and build frontend
+        working-directory: TJXY
+        run: |
+          npm --prefix admin run typecheck
+          VITE_TJXY_SHELL=desktop npm --prefix admin exec -- vite build --outDir ../../TJXY_app/apps/desktop/dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: desktop-frontend
+          path: TJXY_app/apps/desktop/dist
+          if-no-files-found: error
+          retention-days: 1
+
+  package:
+    name: Package ${{ matrix.name }}
+    needs: [validate, frontend]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis,msi
+            expected: windows
+          - name: Windows ARM64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            bundles: nsis,msi
+            expected: windows
+          - name: macOS Apple Silicon
+            runner: macos-latest
+            target: aarch64-apple-darwin
+            bundles: dmg
+            expected: dmg
+          - name: Linux x86_64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            bundles: appimage,deb
+            expected: linux
+          - name: Linux ARM64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            bundles: appimage,deb
+            expected: linux
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          path: TJXY_app
+      - uses: actions/checkout@v6
+        with:
+          repository: youtonghy/TJXY
+          ref: main
+          path: TJXY
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: TJXY_app/pnpm-lock.yaml
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+      - name: Install workspace dependencies
+        working-directory: TJXY_app
+        run: pnpm install --filter desktop --frozen-lockfile
+      - uses: actions/download-artifact@v5
+        with:
+          name: desktop-frontend
+          path: TJXY_app/apps/desktop/dist
+      - name: Create CI Tauri config
+        working-directory: TJXY_app
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: node -e "const fs=require('fs'); const c=JSON.parse(fs.readFileSync('apps/desktop/src-tauri/tauri.release.conf.json','utf8')); c.version=process.env.RELEASE_VERSION; fs.writeFileSync('apps/desktop/src-tauri/tauri.ci.conf.json', JSON.stringify(c));"
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: TJXY_app/apps/desktop
+          tagName: ${{ needs.validate.outputs.tag }}
+          releaseName: TJXY v${{ needs.validate.outputs.version }}
+          releaseBody: Desktop bundles for TJXY v${{ needs.validate.outputs.version }}.
+          releaseDraft: true
+          prerelease: false
+          args: >-
+            --target ${{ matrix.target }}
+            --bundles ${{ matrix.bundles }}
+            --config src-tauri/tauri.ci.conf.json
+      - name: Verify expected bundles
+        working-directory: TJXY_app
+        shell: bash
+        run: |
+          bundle_dir="apps/desktop/target/${{ matrix.target }}/release/bundle"
+          test -d "$bundle_dir"
+          case "${{ matrix.expected }}" in
+            windows)
+              find "$bundle_dir" -type f -name '*.exe' -print -quit | grep -q .
+              find "$bundle_dir" -type f -name '*.msi' -print -quit | grep -q .
+              ;;
+            dmg) find "$bundle_dir" -type f -name '*.dmg' -print -quit | grep -q . ;;
+            linux)
+              find "$bundle_dir" -type f -name '*.AppImage' -print -quit | grep -q .
+              find "$bundle_dir" -type f -name '*.deb' -print -quit | grep -q .
+              ;;
+          esac
