@@ -1,4 +1,4 @@
-import { clientRequest, type ClientSession } from './http';
+import { clientRequest, type ClientSession } from './http.ts';
 
 export interface PlaybackSource {
   Id: string;
@@ -6,8 +6,28 @@ export interface PlaybackSource {
   Container?: string;
   Bitrate?: number;
   RunTimeTicks?: number;
+  IsDefault?: boolean;
+  IsLive?: boolean;
   SupportsDirectPlay?: boolean;
+  SupportsDirectStream?: boolean;
+  SupportsTranscoding?: boolean;
   DirectStreamUrl?: string;
+  RequiredHttpHeaders?: Record<string, string>;
+  MediaStreams?: PlaybackStream[];
+}
+
+export interface PlaybackStream {
+  Type?: 'Audio' | 'Video' | 'Subtitle';
+  Codec?: string;
+  Language?: string;
+  Width?: number;
+  Height?: number;
+  Channels?: number;
+  DeliveryUrl?: string;
+  IsExternal?: boolean;
+  IsDefault?: boolean;
+  IsForced?: boolean;
+  Index?: number;
 }
 
 export interface PlaybackInfo {
@@ -67,10 +87,13 @@ export async function stopPlayback(session: ClientSession, state: PlaybackState)
 const BROWSER_CONTAINERS = new Set(['mp4', 'm4v', 'webm', 'mp3', 'm4a', 'ogg']);
 
 export function nativeSources(sources: PlaybackSource[]): PlaybackSource[] {
-  const withId = sources.filter((source) => Boolean(source.Id));
-  const direct = withId.filter((source) => source.SupportsDirectPlay !== false);
+  const withId = sources.filter((source) => (
+    Boolean(source.Id) && Boolean(source.DirectStreamUrl) && source.IsLive !== true
+  ));
+  const direct = withId.filter((source) => source.SupportsDirectPlay !== false && source.IsLive !== true);
   const pool = direct.length > 0 ? direct : withId;
   const preferred = pool.filter((source) => BROWSER_CONTAINERS.has((source.Container ?? '').toLowerCase()));
+  preferred.sort((left, right) => Number(right.IsDefault === true) - Number(left.IsDefault === true));
   if (preferred.length === 0) return pool;
   const rest = pool.filter((source) => !preferred.includes(source));
   return [...preferred, ...rest];

@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node ./scripts/start-expo.cjs",
     "android": "node ./scripts/start-expo.cjs --android",
-    "ios": "node ./scripts/start-expo.cjs --ios"
+    "ios": "node ./scripts/start-expo.cjs --ios",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@expo/metro-runtime": "~57.0.10",

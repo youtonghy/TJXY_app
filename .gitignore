@@ -1,4 +1,6 @@
 node_modules
+apps/desktop/src-tauri/runtime/*/lib/
+apps/desktop/src-tauri/runtime/*/manifest.sha256
 dist
 target
 .expo

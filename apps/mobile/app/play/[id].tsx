@@ -163,7 +163,7 @@ function NativePlayer({
   const player = useVideoPlayer(
     {
       uri: url,
-      contentType: 'auto',
+      contentType: 'progressive',
       metadata: { title },
     },
     (instance) => {
@@ -181,7 +181,7 @@ function NativePlayer({
   }, []);
 
   function seekBy(seconds: number) {
-    const knownDuration = player.duration > 0 ? player.duration : duration;
+    const knownDuration = player.isLive ? 0 : (player.duration > 0 ? player.duration : duration);
     const nextTime = Math.max(
       0,
       knownDuration > 0
