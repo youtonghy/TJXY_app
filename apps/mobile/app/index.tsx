@@ -31,6 +31,34 @@ function toBase64(bytes: Uint8Array): string {
   return output;
 }
 
+function fromBase64(value: string): Uint8Array {
+  const clean = value.replace(/=+$/, '');
+  const bytes = new Uint8Array(Math.floor((clean.length * 3) / 4));
+  let out = 0;
+  for (let offset = 0; offset + 3 < clean.length; offset += 4) {
+    const a = BASE64_ALPHABET.indexOf(clean[offset]!);
+    const b = BASE64_ALPHABET.indexOf(clean[offset + 1]!);
+    const c = BASE64_ALPHABET.indexOf(clean[offset + 2]!);
+    const d = BASE64_ALPHABET.indexOf(clean[offset + 3]!);
+    bytes[out++] = (a << 2) | (b >> 4);
+    bytes[out++] = ((b & 0x0f) << 4) | (c >> 2);
+    bytes[out++] = ((c & 0x03) << 6) | d;
+  }
+  const rem = clean.length % 4;
+  if (rem === 2) {
+    const a = BASE64_ALPHABET.indexOf(clean[clean.length - 2]!);
+    const b = BASE64_ALPHABET.indexOf(clean[clean.length - 1]!);
+    bytes[out++] = (a << 2) | (b >> 4);
+  } else if (rem === 3) {
+    const a = BASE64_ALPHABET.indexOf(clean[clean.length - 3]!);
+    const b = BASE64_ALPHABET.indexOf(clean[clean.length - 2]!);
+    const c = BASE64_ALPHABET.indexOf(clean[clean.length - 1]!);
+    bytes[out++] = (a << 2) | (b >> 4);
+    bytes[out++] = ((b & 0x0f) << 4) | (c >> 2);
+  }
+  return bytes.subarray(0, out);
+}
+
 interface FetchMessage {
   kind: 'tjxy-fetch' | 'tjxy-fetch-abort';
   id: string;
@@ -38,6 +66,7 @@ interface FetchMessage {
   method?: string;
   headers?: Record<string, string>;
   body?: string | null;
+  bodyBase64?: string;
 }
 
 export default function WebHomeScreen() {
@@ -80,7 +109,7 @@ export default function WebHomeScreen() {
       const response = await expoFetch(message.url!, {
         method: message.method ?? 'GET',
         headers: message.headers,
-        body: message.body ?? undefined,
+        body: message.bodyBase64 ? fromBase64(message.bodyBase64) : (message.body ?? undefined),
         signal: controller.signal,
         credentials: 'omit',
         redirect: 'follow',

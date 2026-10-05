@@ -59,6 +59,42 @@ export const BRIDGE_SCRIPT = String.raw`
   window.addEventListener('message', onMessage);
   document.addEventListener('message', onMessage);
 
+  function toBase64(bytes) {
+    var binary = '';
+    for (var offset = 0; offset < bytes.length; offset += 8192) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(offset, offset + 8192));
+    }
+    return btoa(binary);
+  }
+
+  // Binary request bodies cannot cross the postMessage bridge as JSON, so
+  // they are base64-encoded and decoded back to bytes on the native side.
+  function encodeBody(body, done) {
+    if (body === undefined || body === null || typeof body === 'string') {
+      done({ body: body == null ? null : body });
+      return;
+    }
+    var bytes = null;
+    if (body instanceof ArrayBuffer) {
+      bytes = new Uint8Array(body);
+    } else if (ArrayBuffer.isView(body)) {
+      bytes = new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+    }
+    if (bytes) {
+      done({ bodyBase64: toBase64(bytes) });
+      return;
+    }
+    if (typeof Blob !== 'undefined' && body instanceof Blob) {
+      body.arrayBuffer().then(function (buffer) {
+        done({ bodyBase64: toBase64(new Uint8Array(buffer)) });
+      }, function () {
+        done({ body: null });
+      });
+      return;
+    }
+    try { done({ body: String(body) }); } catch (error) { done({ body: null }); }
+  }
+
   var originalFetch = window.fetch.bind(window);
   window.fetch = function (input, init) {
     var url;
@@ -78,19 +114,18 @@ export const BRIDGE_SCRIPT = String.raw`
         emit({ kind: 'tjxy-fetch-abort', id: id });
       }, { once: true });
     }
-    var body = init.body;
-    if (body !== undefined && body !== null && typeof body !== 'string') {
-      try { body = String(body); } catch (error) { body = null; }
-    }
     return new Promise(function (resolve, reject) {
-      pending.set(id, { resolve: resolve, reject: reject, controller: null });
-      emit({
-        kind: 'tjxy-fetch',
-        id: id,
-        url: url,
-        method: init.method || 'GET',
-        headers: headers,
-        body: body == null ? null : body,
+      encodeBody(init.body, function (payload) {
+        pending.set(id, { resolve: resolve, reject: reject, controller: null });
+        emit({
+          kind: 'tjxy-fetch',
+          id: id,
+          url: url,
+          method: init.method || 'GET',
+          headers: headers,
+          body: payload.body == null ? null : payload.body,
+          bodyBase64: payload.bodyBase64,
+        });
       });
     });
   };
