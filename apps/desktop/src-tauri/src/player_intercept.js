@@ -2,7 +2,9 @@
 // route (/app/play/:id) never reach React Router: the item id and the current
 // session are handed to the dedicated native player window instead, and the
 // page stays where it was. Session values are read from the storage keys the
-// /app client writes (tjxy.api.baseUrl, tjxy.web.token).
+// /app client writes (tjxy.api.baseUrl, tjxy.web.token). The token is empty
+// for a "remember me" session restored after a restart; the native side then
+// falls back to the persisted session cookie.
 (function () {
   if (window.__tjxyPlayerInterceptInstalled) return;
   window.__tjxyPlayerInterceptInstalled = true;

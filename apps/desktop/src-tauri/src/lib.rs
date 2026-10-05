@@ -2,6 +2,7 @@ use tauri::AppHandle;
 
 mod player;
 mod server;
+mod session_cookie;
 
 const PLAYER_INTERCEPT_SCRIPT: &str = include_str!("player_intercept.js");
 

@@ -107,7 +107,9 @@ device-local and remain selected after a restart.
 
 Playback never uses the web player page. An initialization script intercepts the web client's
 navigation to `/app/play/:id`, keeps the main window on the current page, and passes the item id
-and signed-in session to the `desktop_player_open` command. A dedicated native window then fetches
+and signed-in session to the `desktop_player_open` command (a "remember me" session restored after
+a restart has no token in web storage, so the player reads the server's `tjxy_session` cookie from
+the HTTP plugin's persisted cookie jar instead). A dedicated native window then fetches
 the item, playback info and a playback ticket from the server itself and plays the stream with the
 bundled libmpv. Controls are mpv's own on-screen controller and default key bindings (space,
 arrows, `f`/double-click for fullscreen, `j` for subtitles, `#` for audio, `q` to close). The

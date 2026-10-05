@@ -95,7 +95,13 @@ pub fn open(app: &AppHandle, request: OpenRequest) -> Result<(), String> {
     if request.item_id.trim().is_empty() {
         return Err("缺少要播放的条目。".into());
     }
-    let session = Session::new(&request.server_origin, &request.access_token)?;
+    // A "remember me" sign-in restored after a restart only has the cookie.
+    let token = if request.access_token.trim().is_empty() {
+        crate::session_cookie::session_token(app, &request.server_origin)?.unwrap_or_default()
+    } else {
+        request.access_token
+    };
+    let session = Session::new(&request.server_origin, &token)?;
     close(app, None)?;
     start(app, session, request.item_id)
 }
