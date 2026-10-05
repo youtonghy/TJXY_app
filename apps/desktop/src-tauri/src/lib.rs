@@ -8,9 +8,16 @@ const PLAYER_INTERCEPT_SCRIPT: &str = include_str!("player_intercept.js");
 #[tauri::command]
 async fn desktop_player_open(app: AppHandle, request: player::OpenRequest) -> Result<(), String> {
     let worker = app.clone();
-    tauri::async_runtime::spawn_blocking(move || player::open(&worker, request))
+    let item_id = request.item_id.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || player::open(&worker, request))
         .await
-        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+        .and_then(|result| result);
+    match &result {
+        Ok(()) => eprintln!("player: opened item {item_id}"),
+        Err(error) => eprintln!("player: failed to open item {item_id}: {error}"),
+    }
+    result
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

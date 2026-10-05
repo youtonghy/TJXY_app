@@ -22,10 +22,23 @@
     return { itemId: decodeURIComponent(match[1]), search: parsed.search };
   }
 
+  // WKWebView ignores window.alert, so failures are shown as an in-page notice.
+  function showError(message) {
+    console.error('[tjxy-player] ' + message);
+    var notice = document.createElement('div');
+    notice.setAttribute('role', 'alert');
+    notice.textContent = '无法启动播放器：' + message;
+    notice.style.cssText = 'position:fixed;left:50%;bottom:32px;transform:translateX(-50%);z-index:2147483647;'
+      + 'max-width:min(560px,90vw);padding:12px 16px;border-radius:10px;background:rgba(20,20,20,.92);'
+      + 'color:#fff;font:14px/1.5 system-ui,sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.35);';
+    (document.body || document.documentElement).appendChild(notice);
+    setTimeout(function () { notice.remove(); }, 6000);
+  }
+
   function openNativePlayer(target) {
     var internals = window.__TAURI_INTERNALS__;
     if (!internals || typeof internals.invoke !== 'function') {
-      window.alert('无法启动播放器：桌面运行时不可用。');
+      showError('桌面运行时不可用。');
       return;
     }
     var request = {
@@ -34,7 +47,7 @@
       itemId: target.itemId,
     };
     internals.invoke('desktop_player_open', { request: request }).catch(function (error) {
-      window.alert('无法启动播放器：' + (typeof error === 'string' ? error : (error && error.message) || '未知错误'));
+      showError(typeof error === 'string' ? error : (error && error.message) || '未知错误');
     });
   }
 

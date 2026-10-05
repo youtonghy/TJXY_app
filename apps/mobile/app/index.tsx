@@ -4,7 +4,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { useRouter } from 'expo-router';
 import { Alert, Spinner } from 'heroui-native';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Linking, View } from 'react-native';
+import { Alert as NativeAlert, Linking, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import WebView, { type WebViewMessageEvent } from 'react-native-webview';
 import { useBridgeSession } from '../src/bridgeSession';
@@ -172,6 +172,7 @@ export default function WebHomeScreen() {
         const request = parseNativePlayRequest(message.payload);
         if (!request) {
           console.warn('Ignoring tjxy-native-play without an item id or a signed-in session.');
+          NativeAlert.alert('无法播放', '没有读取到登录会话，请重新登录后再试。');
           break;
         }
         const now = Date.now();
