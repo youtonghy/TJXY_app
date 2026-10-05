@@ -1,26 +1,71 @@
-//! AppKit view that hosts the mpv OpenGL surface and forwards mouse and
-//! keyboard input to mpv, so mpv's own on-screen controller (OSC) and default
-//! key bindings drive playback.
+//! Native AppKit player chrome: a full-size video view that hosts the mpv
+//! OpenGL surface, a QuickTime-style translucent control bar and a centered
+//! loading/error overlay. Controls send `Control` actions to the worker; the
+//! worker pushes `UiState` snapshots back through `update`.
 
-use super::{Input, WorkerCommand};
+use super::{Control, Status, Track, TrackKind, UiState, WorkerCommand};
 use objc2::rc::Retained;
-use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
+use objc2::runtime::{AnyObject, Sel};
+use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSAutoresizingMaskOptions, NSEvent, NSEventModifierFlags, NSResponder, NSTrackingArea,
-    NSTrackingAreaOptions, NSView, NSWindow,
+    NSApplication, NSAutoresizingMaskOptions, NSButton, NSColor, NSControlSize, NSCursor,
+    NSEvent, NSEventModifierFlags, NSEventType, NSFont, NSFontWeightRegular, NSFontWeightSemibold,
+    NSImage, NSImageScaling, NSImageSymbolConfiguration, NSMenu, NSMenuItem, NSProgressIndicator,
+    NSProgressIndicatorStyle, NSResponder, NSSlider, NSTextAlignment, NSTextField, NSTrackingArea,
+    NSTrackingAreaOptions, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
+    NSVisualEffectState, NSVisualEffectView, NSWindow,
 };
-use objc2_foundation::{NSObject, NSObjectProtocol, NSRect};
-use std::cell::Cell;
+use objc2_foundation::{
+    NSInteger, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+};
+use std::cell::{Cell, OnceCell, RefCell};
+use std::collections::HashMap;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::AppHandle;
 
-/// Trackpads report pixel deltas; this many points equal one wheel notch.
-const PRECISE_SCROLL_STEP: f64 = 24.0;
+const SEEK_STEP: f64 = 15.0;
+const HIDE_AFTER: Duration = Duration::from_secs(3);
+const BAR_HEIGHT: f64 = 76.0;
+const BAR_MARGIN: f64 = 24.0;
+const BAR_MIN_WIDTH: f64 = 360.0;
+const BAR_MAX_WIDTH: f64 = 640.0;
+const AUDIO_TAG: NSInteger = 1_000_000;
+const SUBTITLE_TAG: NSInteger = 2_000_000;
+const SUBTITLE_OFF_TAG: NSInteger = 2_999_999;
+const SPEED_TAG: NSInteger = 3_000_000;
+const SPEEDS: [f64; 6] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+
+thread_local! {
+    /// Player views by player id. Only touched on the main thread; holding
+    /// strong references keeps queued UI updates safe after the window closes.
+    static VIEWS: RefCell<HashMap<String, Retained<PlayerView>>> = RefCell::new(HashMap::new());
+}
+
+struct Widgets {
+    video: Retained<NSView>,
+    bar: Retained<NSVisualEffectView>,
+    mute: Retained<NSButton>,
+    volume: Retained<NSSlider>,
+    back: Retained<NSButton>,
+    play: Retained<NSButton>,
+    forward: Retained<NSButton>,
+    tracks: Retained<NSButton>,
+    fullscreen: Retained<NSButton>,
+    seek: Retained<NSSlider>,
+    elapsed: Retained<NSTextField>,
+    remaining: Retained<NSTextField>,
+    spinner: Retained<NSProgressIndicator>,
+    message: Retained<NSTextField>,
+}
 
 pub struct PlayerViewIvars {
     sender: mpsc::Sender<WorkerCommand>,
-    scroll: Cell<f64>,
+    widgets: OnceCell<Widgets>,
+    state: RefCell<Option<UiState>>,
+    scrubbing: Cell<bool>,
+    last_activity: Cell<Instant>,
+    chrome_visible: Cell<bool>,
 }
 
 define_class!(
@@ -45,73 +90,110 @@ define_class!(
             true
         }
 
-        #[unsafe(method(acceptsFirstMouse:))]
-        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
-            true
+        #[unsafe(method(setFrameSize:))]
+        fn set_frame_size(&self, size: NSSize) {
+            let _: () = unsafe { msg_send![super(self), setFrameSize: size] };
+            self.layout_widgets();
+            self.send_subtitle_inset();
         }
 
         #[unsafe(method(mouseMoved:))]
-        fn mouse_moved(&self, event: &NSEvent) {
-            self.send_position(event);
-        }
-
-        #[unsafe(method(mouseDragged:))]
-        fn mouse_dragged(&self, event: &NSEvent) {
-            self.send_position(event);
-        }
-
-        #[unsafe(method(rightMouseDragged:))]
-        fn right_mouse_dragged(&self, event: &NSEvent) {
-            self.send_position(event);
+        fn mouse_moved(&self, _event: &NSEvent) {
+            self.touch();
         }
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
-            self.send_button(event, "MBTN_LEFT", true);
-        }
-
-        #[unsafe(method(mouseUp:))]
-        fn mouse_up(&self, event: &NSEvent) {
-            self.send_button(event, "MBTN_LEFT", false);
-        }
-
-        #[unsafe(method(rightMouseDown:))]
-        fn right_mouse_down(&self, event: &NSEvent) {
-            self.send_button(event, "MBTN_RIGHT", true);
-        }
-
-        #[unsafe(method(rightMouseUp:))]
-        fn right_mouse_up(&self, event: &NSEvent) {
-            self.send_button(event, "MBTN_RIGHT", false);
-        }
-
-        #[unsafe(method(otherMouseDown:))]
-        fn other_mouse_down(&self, event: &NSEvent) {
-            self.send_button(event, "MBTN_MID", true);
-        }
-
-        #[unsafe(method(otherMouseUp:))]
-        fn other_mouse_up(&self, event: &NSEvent) {
-            self.send_button(event, "MBTN_MID", false);
+            self.touch();
+            if event.clickCount() == 2 && !self.over_bar(event) {
+                self.send(Control::ToggleFullscreen);
+            }
         }
 
         #[unsafe(method(scrollWheel:))]
-        fn scroll_wheel(&self, event: &NSEvent) {
-            let step = if event.hasPreciseScrollingDeltas() { PRECISE_SCROLL_STEP } else { 1.0 };
-            let total = self.ivars().scroll.get() + event.scrollingDeltaY();
-            let notches = (total / step).trunc();
-            self.ivars().scroll.set(total - notches * step);
-            let key = if notches > 0.0 { "WHEEL_UP" } else { "WHEEL_DOWN" };
-            for _ in 0..(notches.abs() as usize).min(8) {
-                self.send(Input::Key(key.into()));
-            }
+        fn scroll_wheel(&self, _event: &NSEvent) {
+            self.touch();
         }
 
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
+            self.touch();
             if let Some(key) = mpv_key(event) {
-                self.send(Input::Key(key));
+                self.send(Control::Key(key));
             }
+        }
+
+        #[unsafe(method(togglePlay:))]
+        fn toggle_play(&self, _sender: Option<&AnyObject>) {
+            self.touch();
+            self.send(Control::TogglePause);
+        }
+
+        #[unsafe(method(seekBack:))]
+        fn seek_back(&self, _sender: Option<&AnyObject>) {
+            self.touch();
+            self.send(Control::SeekBy(-SEEK_STEP));
+        }
+
+        #[unsafe(method(seekForward:))]
+        fn seek_forward(&self, _sender: Option<&AnyObject>) {
+            self.touch();
+            self.send(Control::SeekBy(SEEK_STEP));
+        }
+
+        #[unsafe(method(toggleMute:))]
+        fn toggle_mute(&self, _sender: Option<&AnyObject>) {
+            self.touch();
+            self.send(Control::ToggleMute);
+        }
+
+        #[unsafe(method(toggleFullscreen:))]
+        fn toggle_fullscreen(&self, _sender: Option<&AnyObject>) {
+            self.touch();
+            self.send(Control::ToggleFullscreen);
+        }
+
+        #[unsafe(method(volumeChanged:))]
+        fn volume_changed(&self, sender: &NSSlider) {
+            self.touch();
+            self.send(Control::SetVolume(sender.doubleValue()));
+        }
+
+        #[unsafe(method(seekChanged:))]
+        fn seek_changed(&self, sender: &NSSlider) {
+            self.touch();
+            let finished = NSApplication::sharedApplication(self.mtm())
+                .currentEvent()
+                .is_some_and(|event| event.r#type() == NSEventType::LeftMouseUp);
+            self.ivars().scrubbing.set(!finished);
+            let seconds = sender.doubleValue();
+            if let Some(widgets) = self.ivars().widgets.get() {
+                widgets.elapsed.setStringValue(&NSString::from_str(&format_time(seconds)));
+            }
+            self.send(Control::SeekTo { seconds, exact: finished });
+        }
+
+        #[unsafe(method(showTracks:))]
+        fn show_tracks(&self, sender: &NSButton) {
+            self.touch();
+            let menu = self.tracks_menu();
+            let origin = NSPoint::new(0.0, sender.bounds().size.height + 4.0);
+            menu.popUpMenuPositioningItem_atLocation_inView(None, origin, Some(sender));
+        }
+
+        #[unsafe(method(selectMenuItem:))]
+        fn select_menu_item(&self, sender: &NSMenuItem) {
+            let tag = sender.tag();
+            let control = if tag == SUBTITLE_OFF_TAG {
+                Control::SelectSubtitle(None)
+            } else if tag >= SPEED_TAG {
+                Control::SetSpeed((tag - SPEED_TAG) as f64 / 100.0)
+            } else if tag >= SUBTITLE_TAG {
+                Control::SelectSubtitle(Some((tag - SUBTITLE_TAG) as i64))
+            } else {
+                Control::SelectAudio((tag - AUDIO_TAG) as i64)
+            };
+            self.send(control);
         }
     }
 );
@@ -120,41 +202,329 @@ impl PlayerView {
     fn new(mtm: MainThreadMarker, frame: NSRect, sender: mpsc::Sender<WorkerCommand>) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(PlayerViewIvars {
             sender,
-            scroll: Cell::new(0.0),
+            widgets: OnceCell::new(),
+            state: RefCell::new(None),
+            scrubbing: Cell::new(false),
+            last_activity: Cell::new(Instant::now()),
+            chrome_visible: Cell::new(true),
         });
         // SAFETY: initWithFrame: is NSView's designated initializer.
-        unsafe { msg_send![super(this), initWithFrame: frame] }
+        let view: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
+        view.build_widgets(mtm);
+        view
     }
 
-    fn send(&self, input: Input) {
+    fn send(&self, control: Control) {
         // The worker is gone once playback shuts down; dropping input then is fine.
-        let _ = self.ivars().sender.send(WorkerCommand::Input(input));
+        let _ = self.ivars().sender.send(WorkerCommand::Control(control));
     }
 
-    fn send_position(&self, event: &NSEvent) {
+    fn touch(&self) {
+        self.ivars().last_activity.set(Instant::now());
+        self.set_chrome_visible(true);
+    }
+
+    fn over_bar(&self, event: &NSEvent) -> bool {
+        let Some(widgets) = self.ivars().widgets.get() else {
+            return false;
+        };
         let point = self.convertPoint_fromView(event.locationInWindow(), None);
-        let scale = self.window().map_or(1.0, |window| window.backingScaleFactor());
-        self.send(Input::Mouse {
-            x: (point.x * scale).round() as i64,
-            y: (point.y * scale).round() as i64,
-        });
+        contains(widgets.bar.frame(), point)
     }
 
-    fn send_button(&self, event: &NSEvent, button: &'static str, down: bool) {
-        self.send_position(event);
-        self.send(Input::Button { name: button, down });
+    fn build_widgets(&self, mtm: MainThreadMarker) {
+        let bounds = self.bounds();
+        let video = NSView::initWithFrame(NSView::alloc(mtm), bounds);
+        video.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        self.addSubview(&video);
+
+        let bar = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), NSRect::ZERO);
+        bar.setMaterial(NSVisualEffectMaterial::HUDWindow);
+        bar.setBlendingMode(NSVisualEffectBlendingMode::WithinWindow);
+        bar.setState(NSVisualEffectState::Active);
+        bar.setWantsLayer(true);
+        // SAFETY: a layer-backed view always has a CALayer.
+        unsafe {
+            let layer: *mut AnyObject = msg_send![&*bar, layer];
+            let _: () = msg_send![layer, setCornerRadius: 14.0f64];
+            let _: () = msg_send![layer, setMasksToBounds: true];
+        }
+        self.addSubview(&bar);
+
+        let target: &AnyObject = self.as_ref();
+        let mute = symbol_button(mtm, "speaker.wave.2.fill", "静音", 13.0, target, sel!(toggleMute:));
+        let back = symbol_button(mtm, "gobackward.15", "后退 15 秒", 17.0, target, sel!(seekBack:));
+        let play = symbol_button(mtm, "play.fill", "播放", 24.0, target, sel!(togglePlay:));
+        let forward = symbol_button(mtm, "goforward.15", "前进 15 秒", 17.0, target, sel!(seekForward:));
+        let tracks = symbol_button(mtm, "captions.bubble", "音轨与字幕", 15.0, target, sel!(showTracks:));
+        let fullscreen = symbol_button(
+            mtm,
+            "arrow.up.left.and.arrow.down.right",
+            "全屏",
+            13.0,
+            target,
+            sel!(toggleFullscreen:),
+        );
+        // SAFETY: the target outlives the slider; the action matches the selector.
+        let volume = unsafe {
+            NSSlider::sliderWithValue_minValue_maxValue_target_action(
+                100.0,
+                0.0,
+                100.0,
+                Some(target),
+                Some(sel!(volumeChanged:)),
+                mtm,
+            )
+        };
+        volume.setControlSize(NSControlSize::Small);
+        let seek = unsafe {
+            NSSlider::sliderWithValue_minValue_maxValue_target_action(
+                0.0,
+                0.0,
+                1.0,
+                Some(target),
+                Some(sel!(seekChanged:)),
+                mtm,
+            )
+        };
+        seek.setControlSize(NSControlSize::Small);
+        seek.setContinuous(true);
+        seek.setEnabled(false);
+        let white = NSColor::whiteColor();
+        volume.setTrackFillColor(Some(&white));
+        seek.setTrackFillColor(Some(&white));
+        let elapsed = time_label(mtm, NSTextAlignment::Left);
+        let remaining = time_label(mtm, NSTextAlignment::Right);
+        for view in [&*mute, &*back, &*play, &*forward, &*tracks, &*fullscreen] {
+            bar.addSubview(view);
+        }
+        for view in [&**volume, &**seek, &**elapsed, &**remaining] {
+            bar.addSubview(view);
+        }
+
+        let spinner = NSProgressIndicator::initWithFrame(NSProgressIndicator::alloc(mtm), NSRect::ZERO);
+        spinner.setStyle(NSProgressIndicatorStyle::Spinning);
+        spinner.setControlSize(NSControlSize::Regular);
+        spinner.setDisplayedWhenStopped(false);
+        self.addSubview(&spinner);
+        let message = NSTextField::wrappingLabelWithString(&NSString::from_str(""), mtm);
+        message.setAlignment(NSTextAlignment::Center);
+        message.setTextColor(Some(&NSColor::colorWithWhite_alpha(1.0, 0.9)));
+        message.setFont(Some(&NSFont::systemFontOfSize_weight(14.0, unsafe { NSFontWeightSemibold })));
+        self.addSubview(&message);
+
+        let _ = self.ivars().widgets.set(Widgets {
+            video,
+            bar,
+            mute,
+            volume,
+            back,
+            play,
+            forward,
+            tracks,
+            fullscreen,
+            seek,
+            elapsed,
+            remaining,
+            spinner,
+            message,
+        });
+        self.layout_widgets();
+        self.send_subtitle_inset();
+    }
+
+    fn layout_widgets(&self) {
+        let Some(w) = self.ivars().widgets.get() else {
+            return;
+        };
+        let bounds = self.bounds().size;
+        let width = (bounds.width - BAR_MARGIN * 2.0).clamp(BAR_MIN_WIDTH.min(bounds.width), BAR_MAX_WIDTH);
+        w.bar.setFrame(rect(
+            (bounds.width - width) / 2.0,
+            bounds.height - BAR_HEIGHT - BAR_MARGIN,
+            width,
+            BAR_HEIGHT,
+        ));
+        // The bar is not flipped: y grows upwards from its bottom edge.
+        let center = width / 2.0;
+        w.mute.setFrame(rect(12.0, 38.0, 26.0, 26.0));
+        w.volume.setFrame(rect(40.0, 40.0, 76.0, 22.0));
+        w.back.setFrame(rect(center - 76.0, 36.0, 34.0, 30.0));
+        w.play.setFrame(rect(center - 20.0, 34.0, 40.0, 34.0));
+        w.forward.setFrame(rect(center + 42.0, 36.0, 34.0, 30.0));
+        w.tracks.setFrame(rect(width - 72.0, 38.0, 28.0, 26.0));
+        w.fullscreen.setFrame(rect(width - 40.0, 38.0, 28.0, 26.0));
+        w.elapsed.setFrame(rect(12.0, 10.0, 64.0, 16.0));
+        w.remaining.setFrame(rect(width - 76.0, 10.0, 64.0, 16.0));
+        w.seek.setFrame(rect(80.0, 7.0, (width - 160.0).max(40.0), 22.0));
+
+        w.spinner.setFrame(rect(bounds.width / 2.0 - 16.0, bounds.height / 2.0 - 16.0, 32.0, 32.0));
+        let message_width = (bounds.width - 80.0).clamp(160.0, 520.0);
+        w.message.setFrame(rect(
+            (bounds.width - message_width) / 2.0,
+            bounds.height / 2.0 + 24.0,
+            message_width,
+            60.0,
+        ));
+    }
+
+    fn set_chrome_visible(&self, visible: bool) {
+        if self.ivars().chrome_visible.replace(visible) == visible {
+            return;
+        }
+        let Some(widgets) = self.ivars().widgets.get() else {
+            return;
+        };
+        widgets.bar.setHidden(!visible);
+        if !visible {
+            NSCursor::setHiddenUntilMouseMoves(true);
+        }
+        self.send_subtitle_inset();
+    }
+
+    /// Keeps subtitles above the control bar while it is shown.
+    fn send_subtitle_inset(&self) {
+        let height = self.bounds().size.height;
+        let fraction = if self.ivars().chrome_visible.get() && height > 0.0 {
+            (BAR_HEIGHT + BAR_MARGIN + 8.0) / height
+        } else {
+            0.0
+        };
+        self.send(Control::SubtitleInset(fraction));
+    }
+
+    fn apply(&self, state: UiState) {
+        let Some(w) = self.ivars().widgets.get() else {
+            return;
+        };
+        let ready = state.status == Status::Ready;
+        let loading = matches!(state.status, Status::Loading(_)) || (ready && state.buffering);
+        // SAFETY: plain start/stop of an indeterminate indicator.
+        unsafe {
+            if loading {
+                w.spinner.startAnimation(None);
+            } else {
+                w.spinner.stopAnimation(None);
+            }
+        }
+        let message = match &state.status {
+            Status::Loading(text) | Status::Error(text) => Some(text.as_str()),
+            Status::Ready => state.notice.as_deref(),
+        };
+        w.message.setStringValue(&NSString::from_str(message.unwrap_or("")));
+        w.message.setHidden(message.is_none());
+
+        set_symbol(&w.play, if state.paused { "play.fill" } else { "pause.fill" }, 24.0);
+        set_symbol(
+            &w.mute,
+            if state.muted || state.volume <= 0.0 { "speaker.slash.fill" } else { "speaker.wave.2.fill" },
+            13.0,
+        );
+        set_symbol(
+            &w.fullscreen,
+            if state.fullscreen { "arrow.down.right.and.arrow.up.left" } else { "arrow.up.left.and.arrow.down.right" },
+            13.0,
+        );
+        w.volume.setDoubleValue(state.volume);
+        let seekable = ready && state.duration > 0.0;
+        w.seek.setEnabled(seekable);
+        for button in [&w.back, &w.forward, &w.play] {
+            button.setEnabled(ready);
+        }
+        w.tracks.setEnabled(ready);
+        if !self.ivars().scrubbing.get() {
+            w.seek.setMaxValue(state.duration.max(1.0));
+            w.seek.setDoubleValue(state.position);
+            w.elapsed.setStringValue(&NSString::from_str(&format_time(state.position)));
+        }
+        let remaining = if state.duration > 0.0 {
+            format!("-{}", format_time((state.duration - state.position).max(0.0)))
+        } else {
+            String::new()
+        };
+        w.remaining.setStringValue(&NSString::from_str(&remaining));
+
+        let idle = self.ivars().last_activity.get().elapsed() >= HIDE_AFTER;
+        let pointer_over_bar = self
+            .window()
+            .map(|window| self.convertPoint_fromView(window.mouseLocationOutsideOfEventStream(), None))
+            .is_some_and(|point| contains(w.bar.frame(), point));
+        let hide = ready && !state.paused && idle && !pointer_over_bar && !self.ivars().scrubbing.get();
+        self.set_chrome_visible(!hide);
+        *self.ivars().state.borrow_mut() = Some(state);
+    }
+
+    fn tracks_menu(&self) -> Retained<NSMenu> {
+        let mtm = self.mtm();
+        let menu = NSMenu::new(mtm);
+        menu.setAutoenablesItems(false);
+        let state = self.ivars().state.borrow();
+        let tracks: &[Track] = state.as_ref().map_or(&[], |state| state.tracks.as_slice());
+        let speed = state.as_ref().map_or(1.0, |state| state.speed);
+
+        let audio: Vec<&Track> = tracks.iter().filter(|track| track.kind == TrackKind::Audio).collect();
+        self.add_header(&menu, "音频");
+        if audio.is_empty() {
+            self.add_item(&menu, "无", 0, false, false);
+        }
+        for track in audio {
+            self.add_item(&menu, &track.label, AUDIO_TAG + track.id as NSInteger, track.selected, true);
+        }
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+        self.add_header(&menu, "字幕");
+        let subtitles: Vec<&Track> = tracks.iter().filter(|track| track.kind == TrackKind::Subtitle).collect();
+        let any_selected = subtitles.iter().any(|track| track.selected);
+        self.add_item(&menu, "关闭", SUBTITLE_OFF_TAG, !any_selected, true);
+        for track in subtitles {
+            self.add_item(&menu, &track.label, SUBTITLE_TAG + track.id as NSInteger, track.selected, true);
+        }
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+        self.add_header(&menu, "播放速度");
+        for value in SPEEDS {
+            let label = if value == 1.0 { "正常".to_string() } else { format!("{value}×") };
+            let tag = SPEED_TAG + (value * 100.0).round() as NSInteger;
+            self.add_item(&menu, &label, tag, (speed - value).abs() < 0.01, true);
+        }
+        menu
+    }
+
+    fn add_header(&self, menu: &NSMenu, title: &str) {
+        self.add_item(menu, title, 0, false, false);
+    }
+
+    fn add_item(&self, menu: &NSMenu, title: &str, tag: NSInteger, checked: bool, enabled: bool) {
+        let mtm = self.mtm();
+        // SAFETY: selectMenuItem: is implemented by self, which outlives the menu.
+        let item = unsafe {
+            let item = NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(title),
+                if enabled { Some(sel!(selectMenuItem:)) } else { None },
+                &NSString::from_str(""),
+            );
+            item.setTarget(Some(self.as_ref()));
+            item
+        };
+        item.setTag(tag);
+        item.setEnabled(enabled);
+        item.setState(if checked { 1 } else { 0 });
+        menu.addItem(&item);
     }
 }
 
-/// Adds a full-size player view to the window's content view and returns its
-/// pointer for the OpenGL surface. The view is retained by its superview and
-/// lives as long as the window.
+/// Adds the player view to the window and returns the video view pointer for
+/// the OpenGL surface. Both are retained by the view hierarchy and by the
+/// main-thread registry until `detach`.
 pub fn attach(
     app: &AppHandle,
     window: &tauri::Window,
+    id: &str,
     sender: mpsc::Sender<WorkerCommand>,
 ) -> Result<usize, String> {
     let ns_window = window.ns_window().map_err(|error| error.to_string())? as usize;
+    let id = id.to_string();
     let (result_sender, result) = mpsc::sync_channel(1);
     app.run_on_main_thread(move || {
         let outcome = (|| {
@@ -177,7 +547,6 @@ pub fn attach(
                     NSTrackingArea::alloc(),
                     NSRect::ZERO,
                     NSTrackingAreaOptions::MouseMoved
-                        | NSTrackingAreaOptions::MouseEnteredAndExited
                         | NSTrackingAreaOptions::ActiveInKeyWindow
                         | NSTrackingAreaOptions::InVisibleRect,
                     Some(&view),
@@ -188,7 +557,14 @@ pub fn attach(
             content.addSubview(&view);
             window.setAcceptsMouseMovedEvents(true);
             window.makeFirstResponder(Some(&view));
-            Ok(Retained::as_ptr(&view) as usize)
+            let video = view
+                .ivars()
+                .widgets
+                .get()
+                .map(|widgets| Retained::as_ptr(&widgets.video) as usize)
+                .ok_or_else(|| "player video view is unavailable".to_string())?;
+            VIEWS.with(|views| views.borrow_mut().insert(id, view));
+            Ok(video)
         })();
         let _ = result_sender.send(outcome);
     })
@@ -196,6 +572,86 @@ pub fn attach(
     result
         .recv_timeout(Duration::from_secs(5))
         .map_err(|_| "Timed out while creating the player view.".to_string())?
+}
+
+/// Pushes a playback snapshot to the controls of player `id`.
+pub fn update(app: &AppHandle, id: &str, state: UiState) {
+    let id = id.to_string();
+    let _ = app.run_on_main_thread(move || {
+        let view = VIEWS.with(|views| views.borrow().get(&id).cloned());
+        if let Some(view) = view {
+            view.apply(state);
+        }
+    });
+}
+
+/// Releases the registry's reference to player `id`'s view.
+pub fn detach(app: &AppHandle, id: &str) {
+    let id = id.to_string();
+    let _ = app.run_on_main_thread(move || {
+        VIEWS.with(|views| views.borrow_mut().remove(&id));
+    });
+}
+
+fn symbol_image(name: &str, point_size: f64) -> Option<Retained<NSImage>> {
+    let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(name), None)?;
+    let configuration =
+        NSImageSymbolConfiguration::configurationWithPointSize_weight(point_size, unsafe { NSFontWeightRegular });
+    image.imageWithSymbolConfiguration(&configuration)
+}
+
+fn set_symbol(button: &NSButton, name: &str, point_size: f64) {
+    if let Some(image) = symbol_image(name, point_size) {
+        button.setImage(Some(&image));
+    }
+}
+
+fn symbol_button(
+    mtm: MainThreadMarker,
+    name: &str,
+    tooltip: &str,
+    point_size: f64,
+    target: &AnyObject,
+    action: Sel,
+) -> Retained<NSButton> {
+    let image = symbol_image(name, point_size).unwrap_or_else(|| NSImage::new());
+    // SAFETY: the target outlives the button; the action matches the selector.
+    let button = unsafe { NSButton::buttonWithImage_target_action(&image, Some(target), Some(action), mtm) };
+    button.setBordered(false);
+    button.setImageScaling(NSImageScaling::ScaleNone);
+    button.setContentTintColor(Some(&NSColor::whiteColor()));
+    button.setToolTip(Some(&NSString::from_str(tooltip)));
+    button.setRefusesFirstResponder(true);
+    button
+}
+
+fn time_label(mtm: MainThreadMarker, alignment: NSTextAlignment) -> Retained<NSTextField> {
+    let label = NSTextField::labelWithString(&NSString::from_str(""), mtm);
+    label.setAlignment(alignment);
+    label.setTextColor(Some(&NSColor::colorWithWhite_alpha(1.0, 0.8)));
+    label.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(11.0, unsafe { NSFontWeightRegular })));
+    label
+}
+
+fn rect(x: f64, y: f64, width: f64, height: f64) -> NSRect {
+    NSRect::new(NSPoint::new(x, y), NSSize::new(width.max(0.0), height.max(0.0)))
+}
+
+fn contains(frame: NSRect, point: NSPoint) -> bool {
+    point.x >= frame.origin.x
+        && point.x <= frame.origin.x + frame.size.width
+        && point.y >= frame.origin.y
+        && point.y <= frame.origin.y + frame.size.height
+}
+
+fn format_time(seconds: f64) -> String {
+    let total = if seconds.is_finite() { seconds.max(0.0) as u64 } else { 0 };
+    let (hours, minutes, secs) = (total / 3600, total / 60 % 60, total % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{secs:02}")
+    } else {
+        format!("{minutes}:{secs:02}")
+    }
 }
 
 fn mpv_key(event: &NSEvent) -> Option<String> {
@@ -215,18 +671,6 @@ fn mpv_key(event: &NSEvent) -> Option<String> {
         124 => Some("RIGHT"),
         125 => Some("DOWN"),
         126 => Some("UP"),
-        122 => Some("F1"),
-        120 => Some("F2"),
-        99 => Some("F3"),
-        118 => Some("F4"),
-        96 => Some("F5"),
-        97 => Some("F6"),
-        98 => Some("F7"),
-        100 => Some("F8"),
-        101 => Some("F9"),
-        109 => Some("F10"),
-        103 => Some("F11"),
-        111 => Some("F12"),
         _ => None,
     };
     let base = match named {
@@ -260,4 +704,17 @@ fn mpv_key(event: &NSEvent) -> Option<String> {
     }
     key.push_str(&base);
     Some(key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_time;
+
+    #[test]
+    fn formats_playback_times() {
+        assert_eq!(format_time(0.0), "0:00");
+        assert_eq!(format_time(65.9), "1:05");
+        assert_eq!(format_time(3723.0), "1:02:03");
+        assert_eq!(format_time(f64::NAN), "0:00");
+    }
 }

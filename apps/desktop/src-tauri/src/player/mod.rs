@@ -21,12 +21,64 @@ pub struct OpenRequest {
     pub item_id: String,
 }
 
-/// Input forwarded from the native view to mpv's input system.
+/// Actions from the native player controls.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub enum Input {
-    Mouse { x: i64, y: i64 },
-    Button { name: &'static str, down: bool },
+pub enum Control {
+    /// A key press forwarded to mpv's default key bindings.
     Key(String),
+    TogglePause,
+    SeekBy(f64),
+    SeekTo { seconds: f64, exact: bool },
+    SetVolume(f64),
+    ToggleMute,
+    SelectAudio(i64),
+    SelectSubtitle(Option<i64>),
+    SetSpeed(f64),
+    ToggleFullscreen,
+    /// Fraction of the view height covered by the control bar.
+    SubtitleInset(f64),
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TrackKind {
+    Audio,
+    Subtitle,
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Clone)]
+pub struct Track {
+    pub id: i64,
+    pub kind: TrackKind,
+    pub label: String,
+    pub selected: bool,
+}
+
+/// What the player overlay shows in place of the video.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Clone, PartialEq)]
+pub enum Status {
+    Loading(String),
+    Error(String),
+    Ready,
+}
+
+/// Snapshot of the playback state rendered by the native controls.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Clone)]
+pub struct UiState {
+    pub status: Status,
+    pub notice: Option<String>,
+    pub position: f64,
+    pub duration: f64,
+    pub paused: bool,
+    pub buffering: bool,
+    pub volume: f64,
+    pub muted: bool,
+    pub speed: f64,
+    pub fullscreen: bool,
+    pub tracks: Vec<Track>,
 }
 
 /// Playback data fetched from the server before the stream is opened.
@@ -41,7 +93,7 @@ pub struct Media {
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub enum WorkerCommand {
-    Input(Input),
+    Control(Control),
     Resize {
         width: u32,
         height: u32,
@@ -77,6 +129,8 @@ impl PlayerWorker {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+        #[cfg(target_os = "macos")]
+        macos_view::detach(self.window.app_handle(), &self.id);
         if let Err(error) = self.window.destroy() {
             eprintln!("player window destroy failed: {error}");
         }
@@ -113,12 +167,15 @@ fn start(app: &AppHandle, session: Session, item_id: String) -> Result<(), Strin
         .title("正在加载…")
         .inner_size(1280.0, 720.0)
         .min_inner_size(480.0, 270.0)
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .theme(Some(tauri::Theme::Dark))
+        .background_color(tauri::window::Color(0, 0, 0, 255))
         .center()
         .focused(true)
         .build()
         .map_err(|error| format!("无法创建播放窗口：{error}"))?;
     let (sender, receiver) = mpsc::channel();
-    let view = match macos_view::attach(app, &window, sender.clone()) {
+    let view = match macos_view::attach(app, &window, &id, sender.clone()) {
         Ok(view) => view,
         Err(error) => {
             let _ = window.destroy();
@@ -151,6 +208,8 @@ fn start(app: &AppHandle, session: Session, item_id: String) -> Result<(), Strin
         .name("tjxy-player".into())
         .spawn(move || {
             if let Err(message) = macos::run(macos::Context {
+                app: worker_app.clone(),
+                id: worker_id.clone(),
                 window: worker_window.clone(),
                 session,
                 item_id,

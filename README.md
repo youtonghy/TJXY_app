@@ -111,8 +111,11 @@ and signed-in session to the `desktop_player_open` command (a "remember me" sess
 a restart has no token in web storage, so the player reads the server's `tjxy_session` cookie from
 the HTTP plugin's persisted cookie jar instead). A dedicated native window then fetches
 the item, playback info and a playback ticket from the server itself and plays the stream with the
-bundled libmpv. Controls are mpv's own on-screen controller and default key bindings (space,
-arrows, `f`/double-click for fullscreen, `j` for subtitles, `#` for audio, `q` to close). The
+bundled libmpv. The window has native macOS chrome: a QuickTime-style translucent control bar
+(volume, ±15 s, play/pause, scrubber with elapsed/remaining time, an audio/subtitle/speed menu and
+fullscreen) that hides after 3 s of inactivity while playing and lifts subtitles above itself when
+shown. Double-click toggles fullscreen and mpv's default keys still work (space, arrows, `f`, `j`,
+`#`, `q` to close). The
 player resumes at the saved position, falls back to the next direct-play source when one fails,
 loads the server's external subtitles, reports start/progress/stop, marks the item watched and
 closes at the end, and revokes its ticket on exit. The native player is currently available on

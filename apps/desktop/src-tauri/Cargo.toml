@@ -27,5 +27,5 @@ uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSEvent", "NSResponder", "NSTrackingArea", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSButton", "NSCell", "NSColor", "NSControl", "NSCursor", "NSEvent", "NSFont", "NSFontDescriptor", "NSGraphics", "NSImage", "NSMenu", "NSMenuItem", "NSProgressIndicator", "NSResponder", "NSSlider", "NSText", "NSTextField", "NSTrackingArea", "NSView", "NSVisualEffectView", "NSWindow", "NSAnimation", "NSUserInterfaceItemIdentification"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSObject"] }
