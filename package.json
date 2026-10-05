@@ -5,6 +5,7 @@
   "scripts": {
     "mobile": "pnpm --filter mobile start",
     "desktop": "pnpm --filter desktop dev",
+    "sync:frontend": "node scripts/sync-frontend.mjs",
     "test": "pnpm --filter @tjxy/client-api test"
   }
 }

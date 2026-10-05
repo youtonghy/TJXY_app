@@ -10,6 +10,7 @@ config.resolver.nodeModulesPaths = [
   path.resolve(projectRoot, 'node_modules'),
   path.resolve(workspaceRoot, 'node_modules'),
 ];
+config.resolver.assetExts = [...config.resolver.assetExts, 'html'];
 module.exports = withUniwindConfig(config, {
   cssEntryFile: './global.css',
 });

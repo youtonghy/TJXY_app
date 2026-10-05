@@ -15,18 +15,26 @@ Package manager: **pnpm** (see `packageManager` in the root `package.json`).
 ## Workspace
 
 - `packages/client-api` — shared fetch client (configurable origin)
-- `apps/mobile` — Expo + HeroUI Native
-- `apps/desktop` — Tauri 2 wrapping the existing TJXY `admin` `/app` UI
+- `apps/mobile` — Expo shell around the bundled `/app` web frontend + native player
+- `apps/desktop` — Tauri 2 wrapping the same bundled `/app` frontend + native mpv player
 
-The desktop shell points at the sibling `../TJXY/admin` Vite app with `VITE_TJXY_SHELL=desktop`.
-Production desktop assets are written to `apps/desktop/dist`; they do not
-overwrite the server's web assets in `../TJXY/admin/dist`.
+Both shells bundle the sibling `../TJXY/admin` `/app` UI locally and only load
+runtime data (catalog, account, images, media streams) from the configured
+server at runtime. The admin workspace is selected with `TJXY_ADMIN_DIR` and
+defaults to `../TJXY/admin`.
 
 From the repo root:
 
 ```sh
 pnpm install
+pnpm sync:frontend
 ```
+
+`pnpm sync:frontend` builds the frontend twice — `VITE_TJXY_SHELL=desktop` into
+`apps/desktop/dist` and `VITE_TJXY_SHELL=mobile` into a single-file
+`apps/mobile/assets/web/app.html` — and is required once before the first
+mobile run and after every frontend update. Both output directories are
+gitignored and never overwrite the server's web assets in `../TJXY/admin/dist`.
 
 ## Mobile
 
@@ -59,19 +67,21 @@ JAVA_HOME=/path/to/jdk-17 ANDROID_HOME=/path/to/android-sdk NODE_ENV=production 
 The release APK is written to
 `apps/mobile/android/app/build/outputs/apk/release/app-release.apk`.
 
-On first launch enter the server origin, then sign in. Tabs include Home, Libraries, Search,
-Rankings, AI (when configured), and Profile. Mobile consumes the server's public branding and
-`classic`/`cinema` theme settings while keeping the device's light/dark preference local.
+On first launch the bundled web frontend shows its login screen; enter the server origin, then
+sign in. All browsing (home, libraries, search, rankings, AI chat, profile) happens inside the
+WebView and looks identical to the web `/app` client; only API data, images, and media streams
+come from the network. Because the app serves the frontend from a local bundle, API requests are
+forwarded through a native fetch bridge (the server sends no CORS headers).
 
-The login screen supports password and QR-code modes. A logged-in mobile device can open Profile
-→ Scan authorize, grant camera access, scan another device's TJXY login code, review its
-client/device details, and approve it. Profile also lists active sessions with last activity and
-allows revoking a session; revoking the current session signs the mobile client out. The QR flow
+Playback is handed to a dedicated native player (`expo-video`): the web player page requests a
+playback ticket from the server, posts the ticket's `StreamUrl` plus session details to the
+native side, and the app opens a fullscreen player with resume position, ±10 s seeking, progress
+reporting, and ticket revocation on exit. Returning from playback navigates back to the item
+page.
+
+The Profile → Authorize device action opens a native QR scanner (`expo-camera`): grant camera
+access, scan another device's TJXY login code, review its details, and approve it. The QR flow
 uses the shared one-time challenge endpoints from `packages/client-api`.
-
-AI chat uses the server's finite SSE response. On native Expo, the shared client buffers that
-response before parsing it because Expo's native `Response.body` stream is not reliable across
-the supported SDK/runtime combination.
 
 ## Desktop
 

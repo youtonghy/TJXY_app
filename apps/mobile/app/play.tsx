@@ -1,106 +1,98 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { Alert, Spinner, Typography } from 'heroui-native';
 import { useEventListener } from 'expo';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useRouter } from 'expo-router';
+import * as ScreenOrientation from 'expo-screen-orientation';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { useEffect, useRef, useState } from 'react';
 import { View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
-  getItem,
-  getPlaybackInfo,
-  issuePlaybackTicket,
   reportPlaybackProgress,
-  resolveApiUrl,
   revokePlaybackTicket,
-  selectNativeSource,
   startPlayback,
   stopPlayback,
   togglePlayed,
 } from '@tjxy/client-api';
-import { useClient, useSession } from '../../src/session';
-import { TvButton as Button } from '../../src/ui/TvButton';
-import { TvPressable } from '../../src/ui/TvPressable';
+import { buildClient } from '../src/bridgeSession';
+import { postToWeb, takePendingPlayRequest, type PlayRequest } from '../src/playRequest';
+import { TvButton as Button } from '../src/ui/TvButton';
+import { TvPressable } from '../src/ui/TvPressable';
 
 const TICKS_PER_SECOND = 10_000_000;
 const SEEK_SECONDS = 10;
 
 export default function PlayScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
-  const client = useClient();
-  const { user } = useSession();
   const router = useRouter();
-  const [title, setTitle] = useState('播放');
+  const [request] = useState<PlayRequest | undefined>(() => takePendingPlayRequest());
   const [error, setError] = useState<string>();
-  const [streamUrl, setStreamUrl] = useState<string>();
-  const [resumeTicks, setResumeTicks] = useState(0);
-  const playbackRef = useRef<{ itemId: string; mediaSourceId: string; playSessionId: string; ticketId: string } | undefined>(undefined);
+  const playbackRef = useRef<{
+    itemId: string;
+    mediaSourceId: string;
+    playSessionId: string;
+    ticketId: string;
+  } | undefined>(undefined);
+  const clientRef = useRef<ReturnType<typeof buildClient> | undefined>(undefined);
   const lastProgress = useRef(0);
   const started = useRef(false);
+  const reportedExit = useRef(false);
 
   useEffect(() => {
-    if (!id) return;
-    let active = true;
-    void (async () => {
-      try {
-        const item = await getItem(client, id);
-        if (item.HasMediaSources === false) {
-          if (active) setError('没有可用的视频源');
-          return;
-        }
-        const info = await getPlaybackInfo(client, id);
-        const source = selectNativeSource(info.MediaSources ?? []);
-        if (!source || !info.PlaySessionId) {
-          if (active) setError('此影片没有可直接播放的视频源。');
-          return;
-        }
-        const ticket = await issuePlaybackTicket(client, id, source.Id, info.PlaySessionId);
-        if (!active) {
-          await revokePlaybackTicket(client, ticket.Id);
-          return;
-        }
-        const url = ticket.StreamUrl.startsWith('http')
-          ? ticket.StreamUrl
-          : resolveApiUrl(ticket.StreamUrl, client.baseUrl);
-        const position = item.UserData?.PlaybackPositionTicks ?? 0;
-        playbackRef.current = {
-          itemId: id,
-          mediaSourceId: source.Id,
-          playSessionId: info.PlaySessionId,
-          ticketId: ticket.Id,
-        };
-        lastProgress.current = position;
-        setTitle(item.Name);
-        setResumeTicks(position);
-        setStreamUrl(url);
-      } catch {
-        if (active) setError('无法播放此影片');
-      }
-    })();
+    void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
+    return () => {
+      void ScreenOrientation.unlockAsync();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!request) {
+      setError('没有待播放的内容');
+      return;
+    }
+    if (playbackRef.current) return;
+    clientRef.current = buildClient({
+      serverOrigin: request.serverOrigin,
+      accessToken: request.accessToken,
+      deviceId: request.deviceId,
+      userId: request.userId,
+    });
+    playbackRef.current = {
+      itemId: request.itemId,
+      mediaSourceId: request.mediaSourceId,
+      playSessionId: request.playSessionId,
+      ticketId: request.ticketId,
+    };
+    lastProgress.current = request.positionTicks;
+
     const progress = setInterval(() => {
       const context = playbackRef.current;
-      if (!context || !started.current) return;
+      const client = clientRef.current;
+      if (!context || !client || !started.current) return;
       void reportPlaybackProgress(client, { ...context, positionTicks: lastProgress.current });
     }, 15_000);
     return () => {
-      active = false;
       clearInterval(progress);
       const context = playbackRef.current;
-      if (context) {
+      const client = clientRef.current;
+      if (context && client) {
         if (started.current) void stopPlayback(client, { ...context, positionTicks: lastProgress.current });
         void revokePlaybackTicket(client, context.ticketId);
       }
+      if (!reportedExit.current) {
+        reportedExit.current = true;
+        postToWeb({ type: 'tjxy-playback-exit' });
+      }
     };
-  }, [client, id]);
+  }, [request]);
 
-  if (error) {
+  if (error || !request) {
     return (
       <View className="flex-1 items-center justify-center bg-background px-6" style={{ flex: 1 }}>
         <Alert status="danger">
           <Alert.Indicator />
           <Alert.Content>
             <Alert.Title>无法播放</Alert.Title>
-            <Alert.Description>{error}</Alert.Description>
+            <Alert.Description>{error ?? '没有待播放的内容'}</Alert.Description>
           </Alert.Content>
         </Alert>
         <Button className="mt-4" onPress={() => { router.back(); }}>
@@ -109,23 +101,24 @@ export default function PlayScreen() {
       </View>
     );
   }
-  if (!streamUrl) {
-    return <View className="flex-1 items-center justify-center bg-background" style={{ flex: 1 }}><Spinner /></View>;
-  }
 
   return (
     <NativePlayer
-      resumeTicks={resumeTicks}
-      title={title}
-      url={streamUrl}
+      resumeTicks={request.positionTicks}
+      title={request.title}
+      url={request.streamUrl}
       onBack={() => { router.back(); }}
       onEnded={() => {
         const context = playbackRef.current;
-        if (context && user) void togglePlayed(client, user.Id, context.itemId, true);
+        const client = clientRef.current;
+        if (context && client && request.userId) {
+          void togglePlayed(client, request.userId, context.itemId, true);
+        }
       }}
       onStarted={() => {
         const context = playbackRef.current;
-        if (!context || started.current) return;
+        const client = clientRef.current;
+        if (!context || !client || started.current) return;
         started.current = true;
         void startPlayback(client, { ...context, positionTicks: lastProgress.current });
       }}
@@ -163,7 +156,7 @@ function NativePlayer({
   const player = useVideoPlayer(
     {
       uri: url,
-      contentType: 'progressive',
+      contentType: url.includes('.m3u8') ? 'hls' : 'auto',
       metadata: { title },
     },
     (instance) => {

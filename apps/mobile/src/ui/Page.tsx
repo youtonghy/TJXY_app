@@ -1,87 +1,45 @@
-import { Typography } from 'heroui-native';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { useThemeColor } from 'heroui-native/hooks';
 import { useRouter } from 'expo-router';
 import type { ReactNode } from 'react';
 import { ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { AppToolbar } from './AppToolbar';
-import { BrandMark } from './branding';
-import { useColorMode } from '../theme';
-import { TvButton as Button } from './TvButton';
+import { TvPressable } from './TvPressable';
 
 export function Page({
   back = false,
   children,
   padded = true,
-  scroll = true,
-  toolbar = true,
 }: {
   back?: boolean;
   children: ReactNode;
   padded?: boolean;
-  scroll?: boolean;
-  toolbar?: boolean;
 }) {
   const background = useThemeColor('background');
-  const surface = useThemeColor('surface');
+  const foreground = useThemeColor('foreground');
   const router = useRouter();
-  const { density } = useColorMode();
-  const horizontalPadding = density === 'compact' ? 16 : 20;
 
   return (
-    <View className="flex-1 bg-background" style={{ backgroundColor: background, flex: 1 }}>
-      <SafeAreaView edges={['top']} style={{ flex: 1 }}>
-        {toolbar || back ? (
-          <View
-            className="flex-row items-center justify-between border-b border-border py-2"
-            style={{ backgroundColor: surface, paddingHorizontal: horizontalPadding }}
+    <SafeAreaView className="flex-1 bg-background" edges={['top', 'bottom']} style={{ backgroundColor: background, flex: 1 }}>
+      {back ? (
+        <View className="px-5 pt-2 pb-1">
+          <TvPressable
+            accessibilityLabel="返回"
+            className="size-11 items-center justify-center rounded-full"
+            focusBorderRadius={22}
+            onPress={() => { router.back(); }}
           >
-            {back ? (
-              <Button size="sm" variant="ghost" onPress={() => { router.back(); }}>
-                <Button.Label>返回</Button.Label>
-              </Button>
-            ) : (
-              <BrandMark compact />
-            )}
-            {toolbar ? <View className="shrink-0"><AppToolbar /></View> : <View />}
-          </View>
-        ) : null}
-        {scroll ? (
-          <ScrollView
-            contentContainerStyle={{
-              flexGrow: 1,
-              gap: padded ? (density === 'compact' ? 20 : 24) : 32,
-              paddingBottom: 48,
-              paddingHorizontal: padded ? horizontalPadding : 0,
-              paddingTop: density === 'compact' ? 20 : 24,
-            }}
-            nestedScrollEnabled
-            style={{ flex: 1 }}
-          >
-            {children}
-          </ScrollView>
-        ) : (
-          <View style={{ flex: 1, paddingHorizontal: padded ? horizontalPadding : 0 }}>{children}</View>
-        )}
-      </SafeAreaView>
-    </View>
-  );
-}
-
-export function PageHeader({
-  eyebrow,
-  title,
-  description,
-}: {
-  eyebrow?: string;
-  title: string;
-  description?: string;
-}) {
-  return (
-    <View className="gap-1">
-      {eyebrow ? <Typography className="text-sm font-medium text-accent">{eyebrow}</Typography> : null}
-      <Typography.Heading className="text-3xl font-semibold tracking-tight text-foreground">{title}</Typography.Heading>
-      {description ? <Typography.Paragraph className="max-w-xl text-muted">{description}</Typography.Paragraph> : null}
-    </View>
+            <Ionicons color={foreground} name="arrow-back" size={24} />
+          </TvPressable>
+        </View>
+      ) : null}
+      <ScrollView
+        className="flex-1"
+        contentContainerClassName={padded ? 'gap-4 px-5 pb-8' : 'pb-8'}
+        style={{ flex: 1 }}
+      >
+        {children}
+      </ScrollView>
+    </SafeAreaView>
   );
 }

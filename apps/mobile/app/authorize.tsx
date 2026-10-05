@@ -9,12 +9,33 @@ import {
   previewQrApproval,
   type QrApprovalPreview,
 } from '@tjxy/client-api';
-import { useClient } from '../src/session';
+import { useClient } from '../src/bridgeSession';
 import { Page } from '../src/ui/Page';
 import { TvButton as Button } from '../src/ui/TvButton';
 
 export default function AuthorizeDeviceScreen() {
   const client = useClient();
+  const router = useRouter();
+  if (!client) {
+    return (
+      <Page back>
+        <Alert status="warning">
+          <Alert.Indicator />
+          <Alert.Content>
+            <Alert.Title>尚未登录</Alert.Title>
+            <Alert.Description>请先在应用内登录账户后再授权其他设备。</Alert.Description>
+          </Alert.Content>
+        </Alert>
+        <Button variant="tertiary" onPress={() => { router.back(); }}>
+          <Button.Label>返回</Button.Label>
+        </Button>
+      </Page>
+    );
+  }
+  return <AuthorizeDeviceContent client={client} />;
+}
+
+function AuthorizeDeviceContent({ client }: { client: NonNullable<ReturnType<typeof useClient>> }) {
   const router = useRouter();
   const [permission, requestPermission] = useCameraPermissions();
   const [preview, setPreview] = useState<QrApprovalPreview>();

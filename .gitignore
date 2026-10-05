@@ -11,3 +11,4 @@ apps/mobile/android
 .env.*
 package-lock.json
 npm-shrinkwrap.json
+apps/mobile/assets/web
