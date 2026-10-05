@@ -105,14 +105,16 @@ Set the server address on the login screen. The address and an optionally rememb
 are stored on the device; passwords are never persisted. Language and light/dark preferences are
 device-local and remain selected after a restart.
 
-Playback opens and starts automatically inside the play page. Directly compatible sources use the
-WebView player. Other containers are remuxed by FFmpeg into a token-protected localhost HLS stream;
-native HLS is used where available and HLS.js is loaded on demand on other platforms. The proxy
-starts at the saved resume position, generates media at playback speed, and keeps a bounded rolling
-segment window to avoid unbounded CPU and disk growth.
-
-The desktop client uses an existing `ffmpeg` on `PATH` when available. macOS and Windows can
-download a build on first use. Linux currently requires FFmpeg on `PATH`.
+Playback never uses the web player page. An initialization script intercepts the web client's
+navigation to `/app/play/:id`, keeps the main window on the current page, and passes the item id
+and signed-in session to the `desktop_player_open` command. A dedicated native window then fetches
+the item, playback info and a playback ticket from the server itself and plays the stream with the
+bundled libmpv. Controls are mpv's own on-screen controller and default key bindings (space,
+arrows, `f`/double-click for fullscreen, `j` for subtitles, `#` for audio, `q` to close). The
+player resumes at the saved position, falls back to the next direct-play source when one fails,
+loads the server's external subtitles, reports start/progress/stop, marks the item watched and
+closes at the end, and revokes its ticket on exit. The native player is currently available on
+macOS only.
 
 ## Browser `/app`
 

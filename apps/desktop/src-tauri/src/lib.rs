@@ -1,41 +1,14 @@
 use tauri::AppHandle;
 
 mod player;
+mod server;
+
+const PLAYER_INTERCEPT_SCRIPT: &str = include_str!("player_intercept.js");
 
 #[tauri::command]
-async fn desktop_player_open(
-    app: AppHandle,
-    request: player::OpenRequest,
-    viewport: player::Viewport,
-) -> Result<player::PlayerSnapshot, String> {
+async fn desktop_player_open(app: AppHandle, request: player::OpenRequest) -> Result<(), String> {
     let worker = app.clone();
-    tauri::async_runtime::spawn_blocking(move || player::open(&worker, request, viewport))
-        .await
-        .map_err(|error| error.to_string())?
-}
-
-#[tauri::command]
-fn desktop_player_command(
-    app: AppHandle,
-    load_id: String,
-    command: player::PlayerCommand,
-) -> Result<(), String> {
-    player::command(&app, &load_id, command)
-}
-
-#[tauri::command]
-fn desktop_player_set_viewport(
-    app: AppHandle,
-    load_id: String,
-    viewport: player::Viewport,
-) -> Result<(), String> {
-    player::set_viewport(&app, &load_id, viewport)
-}
-
-#[tauri::command]
-async fn desktop_player_close(app: AppHandle, load_id: Option<String>) -> Result<(), String> {
-    let worker = app.clone();
-    tauri::async_runtime::spawn_blocking(move || player::close(&worker, load_id.as_deref()))
+    tauri::async_runtime::spawn_blocking(move || player::open(&worker, request))
         .await
         .map_err(|error| error.to_string())?
 }
@@ -44,18 +17,29 @@ async fn desktop_player_close(app: AppHandle, load_id: Option<String>) -> Result
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_http::init())
+        .plugin(
+            tauri::plugin::Builder::<tauri::Wry>::new("tjxy-player")
+                .js_init_script(PLAYER_INTERCEPT_SCRIPT.to_string())
+                .build(),
+        )
         .manage(player::PlayerCell::new())
-        .invoke_handler(tauri::generate_handler![
-            desktop_player_open,
-            desktop_player_command,
-            desktop_player_set_viewport,
-            desktop_player_close
-        ])
+        .invoke_handler(tauri::generate_handler![desktop_player_open])
         .build(tauri::generate_context!())
         .expect("error while running TJXY desktop");
     app.run(|app, event| {
-        if matches!(event, tauri::RunEvent::Exit) {
-            let _ = player::close(app, None);
+        // Closing the player joins its worker and flushes the final playback
+        // report, which must not block the main thread the worker relies on.
+        if let tauri::RunEvent::ExitRequested { api, .. } = event {
+            if player::is_active(app) {
+                api.prevent_exit();
+                let app = app.clone();
+                std::thread::spawn(move || {
+                    if let Err(error) = player::close(&app, None) {
+                        eprintln!("player shutdown failed: {error}");
+                    }
+                    app.exit(0);
+                });
+            }
         }
     });
 }
