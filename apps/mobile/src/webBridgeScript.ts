@@ -5,6 +5,8 @@
 //   the native side via WebView.postMessage
 // - app-level messages (tjxy-*) pass through untouched for the web bundle's own
 //   nativeBridge listener
+// - navigation to /app/play/:id never reaches the web PlayerPage: it is posted
+//   to native as tjxy-native-play and the native player does the rest
 export const BRIDGE_SCRIPT = String.raw`
 (function () {
   if (window.__tjxyBridgeInstalled) return;
@@ -129,5 +131,77 @@ export const BRIDGE_SCRIPT = String.raw`
       });
     });
   };
+
+  // Playback is native-only. BrowserRouter re-reads window.location after it
+  // calls pushState/replaceState, so swallowing a /app/play/:id navigation keeps
+  // the page on its current route and PlayerPage never mounts. The session is
+  // read from the web client's own storage keys, so these must stay in sync
+  // with the web bundle: localStorage 'tjxy.api.baseUrl' (server origin),
+  // sessionStorage 'tjxy.web.token' (access token) and localStorage
+  // 'tjxy.web.deviceId' (device id).
+  var PLAY_PATH = /^\/app\/play\/([^\/?#]+)\/?$/;
+
+  function readStorage(storage, key) {
+    try { return storage.getItem(key) || undefined; } catch (error) { return undefined; }
+  }
+
+  function matchPlay(target) {
+    if (target === undefined || target === null) return null;
+    var url;
+    try { url = new URL(String(target), window.location.href); } catch (error) { return null; }
+    var match = PLAY_PATH.exec(url.pathname);
+    if (!match) return null;
+    var itemId;
+    try { itemId = decodeURIComponent(match[1]); } catch (error) { itemId = match[1]; }
+    return { itemId: itemId, libraryId: url.searchParams.get('libraryId') || undefined };
+  }
+
+  function requestNativePlay(play) {
+    emit({
+      type: 'tjxy-native-play',
+      payload: {
+        itemId: play.itemId,
+        libraryId: play.libraryId,
+        session: {
+          serverOrigin: readStorage(window.localStorage, 'tjxy.api.baseUrl'),
+          accessToken: readStorage(window.sessionStorage, 'tjxy.web.token'),
+          deviceId: readStorage(window.localStorage, 'tjxy.web.deviceId'),
+        },
+      },
+    });
+  }
+
+  var originalPushState = window.history.pushState;
+  var originalReplaceState = window.history.replaceState;
+
+  window.history.pushState = function (state, title, url) {
+    var play = matchPlay(url);
+    if (play) {
+      requestNativePlay(play);
+      return;
+    }
+    return originalPushState.apply(window.history, arguments);
+  };
+
+  window.history.replaceState = function (state, title, url) {
+    var play = matchPlay(url);
+    if (play) {
+      requestNativePlay(play);
+      return;
+    }
+    return originalReplaceState.apply(window.history, arguments);
+  };
+
+  var initialPlay = matchPlay(window.location.href);
+  if (initialPlay) {
+    var itemPath = '/app/items/' + encodeURIComponent(initialPlay.itemId)
+      + (initialPlay.libraryId ? '?libraryId=' + encodeURIComponent(initialPlay.libraryId) : '');
+    originalReplaceState.call(window.history, window.history.state, '', itemPath);
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', function () { requestNativePlay(initialPlay); }, { once: true });
+    } else {
+      requestNativePlay(initialPlay);
+    }
+  }
 })();
 `;

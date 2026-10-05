@@ -73,11 +73,14 @@ WebView and looks identical to the web `/app` client; only API data, images, and
 come from the network. Because the app serves the frontend from a local bundle, API requests are
 forwarded through a native fetch bridge (the server sends no CORS headers).
 
-Playback is handed to a dedicated native player (`expo-video`): the web player page requests a
-playback ticket from the server, posts the ticket's `StreamUrl` plus session details to the
-native side, and the app opens a fullscreen player with resume position, ±10 s seeking, progress
-reporting, and ticket revocation on exit. Returning from playback navigates back to the item
-page.
+Playback never uses the web player. The injected bridge script intercepts the web client's
+navigation to `/app/play/:id` (its `history.pushState`/`replaceState` calls), keeps the WebView on
+the current page, and posts the item id plus the signed-in session (read from the web client's
+storage) to the native side. The native `expo-video` player then fetches the item, playback info,
+and a playback ticket from the server itself, and plays the ticket's stream fullscreen with resume
+position, ±10 s and drag seeking, video source switching, embedded audio/subtitle track selection,
+progress reporting, and ticket revocation on exit. Returning from playback goes back to the page
+that started it.
 
 The Profile → Authorize device action opens a native QR scanner (`expo-camera`): grant camera
 access, scan another device's TJXY login code, review its details, and approve it. The QR flow

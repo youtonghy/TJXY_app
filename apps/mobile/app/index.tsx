@@ -8,7 +8,7 @@ import { Linking, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import WebView, { type WebViewMessageEvent } from 'react-native-webview';
 import { useBridgeSession } from '../src/bridgeSession';
-import { postToWeb, registerWebView, setPendingPlayRequest, type PlayRequest } from '../src/playRequest';
+import { parseNativePlayRequest, postToWeb, registerWebView, setPendingPlayRequest } from '../src/playRequest';
 import { BRIDGE_SCRIPT } from '../src/webBridgeScript';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -16,6 +16,7 @@ const webBundleAsset = require('../assets/web/app.html') as number;
 
 const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 const CHUNK_BYTES = 192 * 1024;
+const PLAY_DEBOUNCE_MS = 1000;
 
 function toBase64(bytes: Uint8Array): string {
   let output = '';
@@ -31,7 +32,7 @@ function toBase64(bytes: Uint8Array): string {
   return output;
 }
 
-function fromBase64(value: string): Uint8Array {
+function fromBase64(value: string): Uint8Array<ArrayBuffer> {
   const clean = value.replace(/=+$/, '');
   const bytes = new Uint8Array(Math.floor((clean.length * 3) / 4));
   let out = 0;
@@ -74,6 +75,7 @@ export default function WebHomeScreen() {
   const { setSession } = useBridgeSession();
   const webRef = useRef<WebView>(null);
   const fetchControllers = useRef(new Map<string, AbortController>());
+  const lastPlayAt = useRef(0);
   const [html, setHtml] = useState<string>();
   const [loadError, setLoadError] = useState(false);
 
@@ -166,10 +168,19 @@ export default function WebHomeScreen() {
       return;
     }
     switch (message.type) {
-      case 'tjxy-play':
-        setPendingPlayRequest(message.payload as PlayRequest);
+      case 'tjxy-native-play': {
+        const request = parseNativePlayRequest(message.payload);
+        if (!request) {
+          console.warn('Ignoring tjxy-native-play without an item id or a signed-in session.');
+          break;
+        }
+        const now = Date.now();
+        if (now - lastPlayAt.current < PLAY_DEBOUNCE_MS) break;
+        lastPlayAt.current = now;
+        setPendingPlayRequest(request);
         router.push('/play');
         break;
+      }
       case 'tjxy-session':
         setSession(message.payload as Parameters<typeof setSession>[0]);
         break;

@@ -1,35 +1,41 @@
 import type WebView from 'react-native-webview';
+import type { BridgeSession } from './bridgeSession';
 
-export interface PlayRequestSubtitle {
-  key: string;
-  label: string;
-  url: string;
-  language?: string;
-  isDefault: boolean;
-}
+export type NativePlaySession = Pick<BridgeSession, 'serverOrigin' | 'deviceId'> & { accessToken: string };
 
-export interface PlayRequest {
+export interface NativePlayRequest {
   itemId: string;
-  mediaSourceId: string;
-  playSessionId: string;
-  ticketId: string;
-  streamUrl: string;
-  title: string;
-  serverOrigin: string;
-  accessToken: string;
-  deviceId: string;
-  userId?: string;
-  positionTicks: number;
-  subtitles: PlayRequestSubtitle[];
+  libraryId?: string;
+  session: NativePlaySession;
 }
 
-let pending: PlayRequest | undefined;
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' ? value : undefined;
+}
 
-export function setPendingPlayRequest(request: PlayRequest): void {
+export function parseNativePlayRequest(payload: unknown): NativePlayRequest | undefined {
+  if (!payload || typeof payload !== 'object') return undefined;
+  const record = payload as Record<string, unknown>;
+  const session = (record.session && typeof record.session === 'object' ? record.session : {}) as Record<string, unknown>;
+  const itemId = nonEmptyString(record.itemId);
+  const serverOrigin = nonEmptyString(session.serverOrigin);
+  const accessToken = nonEmptyString(session.accessToken);
+  const deviceId = nonEmptyString(session.deviceId);
+  if (!itemId || !serverOrigin || !accessToken || !deviceId) return undefined;
+  return {
+    itemId,
+    libraryId: nonEmptyString(record.libraryId),
+    session: { serverOrigin, accessToken, deviceId },
+  };
+}
+
+let pending: NativePlayRequest | undefined;
+
+export function setPendingPlayRequest(request: NativePlayRequest): void {
   pending = request;
 }
 
-export function takePendingPlayRequest(): PlayRequest | undefined {
+export function takePendingPlayRequest(): NativePlayRequest | undefined {
   const request = pending;
   pending = undefined;
   return request;
