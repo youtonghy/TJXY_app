@@ -364,6 +364,8 @@ let mainWindow = null;
 function createWindow() {
   const win = new BrowserWindow({
     title: 'TJXY',
+    backgroundColor: '#101014',
+    show: false,
     width: 1280,
     height: 800,
     minWidth: 360,
@@ -380,6 +382,7 @@ function createWindow() {
     },
   });
   mainWindow = win;
+  win.once('ready-to-show', () => win.show());
   win.on('closed', () => {
     if (mainWindow === win) mainWindow = null;
   });
