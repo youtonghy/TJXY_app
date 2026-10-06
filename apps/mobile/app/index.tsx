@@ -1,15 +1,16 @@
 import { Asset } from 'expo-asset';
 import { fetch as expoFetch } from 'expo/fetch';
 import * as FileSystem from 'expo-file-system/legacy';
-import { useRouter } from 'expo-router';
-import { Alert, Spinner } from 'heroui-native';
+import { useFocusEffect, useRouter } from 'expo-router';
+import { Alert, Spinner, Typography } from 'heroui-native';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert as NativeAlert, Linking, View } from 'react-native';
+import { Alert as NativeAlert, BackHandler, Linking, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import WebView, { type WebViewMessageEvent } from 'react-native-webview';
 import { useBridgeSession } from '../src/bridgeSession';
 import { parseNativePlayRequest, postToWeb, registerWebView, setPendingPlayRequest } from '../src/playRequest';
 import { BRIDGE_SCRIPT } from '../src/webBridgeScript';
+import { TvButton as Button } from '../src/ui/TvButton';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const webBundleAsset = require('../assets/web/app.html') as number;
@@ -78,6 +79,33 @@ export default function WebHomeScreen() {
   const lastPlayAt = useRef(0);
   const [html, setHtml] = useState<string>();
   const [loadError, setLoadError] = useState(false);
+  const [webError, setWebError] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const canGoBack = useRef(false);
+
+  const attachWebView = useCallback((instance: WebView | null) => {
+    webRef.current = instance;
+    registerWebView(instance);
+  }, []);
+
+  useFocusEffect(useCallback(() => {
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (!canGoBack.current || !webRef.current) return false;
+      webRef.current.goBack();
+      return true;
+    });
+    return () => subscription.remove();
+  }, []));
+
+  function retry() {
+    for (const controller of fetchControllers.current.values()) controller.abort();
+    fetchControllers.current.clear();
+    canGoBack.current = false;
+    setLoadError(false);
+    setWebError(false);
+    setHtml(undefined);
+    setAttempt((value) => value + 1);
+  }
 
   useEffect(() => {
     let active = true;
@@ -93,10 +121,9 @@ export default function WebHomeScreen() {
       }
     })();
     return () => { active = false; };
-  }, []);
+  }, [attempt]);
 
   useEffect(() => {
-    registerWebView(webRef.current);
     return () => {
       registerWebView(null);
       for (const controller of fetchControllers.current.values()) controller.abort();
@@ -191,37 +218,46 @@ export default function WebHomeScreen() {
     }
   }, [handleFetch, router, setSession]);
 
-  if (loadError) {
+  if (loadError || webError) {
     return (
-      <SafeAreaView className="flex-1 items-center justify-center bg-background px-6">
+      <SafeAreaView className="flex-1 items-center justify-center gap-5 bg-background px-6">
         <Alert status="danger">
           <Alert.Indicator />
           <Alert.Content>
-            <Alert.Title>界面资源缺失</Alert.Title>
-            <Alert.Description>请先在仓库根目录运行 pnpm sync:frontend 生成应用内前端资源。</Alert.Description>
+            <Alert.Title>{loadError ? '无法加载应用界面' : '界面加载中断'}</Alert.Title>
+            <Alert.Description>{loadError ? '请重试；若仍无法加载，请更新或重新安装应用。' : '应用界面暂时无法显示，请重新加载后继续。'}</Alert.Description>
           </Alert.Content>
         </Alert>
+        <Button onPress={retry} accessibilityLabel="重新加载应用界面">
+          <Button.Label>重新加载</Button.Label>
+        </Button>
       </SafeAreaView>
     );
   }
   if (!html) {
     return (
-      <View className="flex-1 items-center justify-center bg-background" style={{ flex: 1 }}>
+      <View className="flex-1 items-center justify-center gap-3 bg-background" style={{ flex: 1 }}>
         <Spinner />
+        <Typography className="text-sm text-muted" accessibilityLiveRegion="polite">正在准备应用界面…</Typography>
       </View>
     );
   }
 
   return (
-    <View className="flex-1 bg-background" style={{ flex: 1 }}>
+    <SafeAreaView className="flex-1 bg-background" edges={['top', 'bottom', 'left', 'right']} style={{ flex: 1 }}>
       <WebView
         allowsFullscreenVideo={false}
         allowsInlineMediaPlayback
         domStorageEnabled
         injectedJavaScriptBeforeContentLoaded={BRIDGE_SCRIPT}
+        injectedJavaScript={BRIDGE_SCRIPT}
         onMessage={onMessage}
         originWhitelist={['*']}
-        ref={webRef}
+        ref={attachWebView}
+        onNavigationStateChange={(state) => { canGoBack.current = state.canGoBack; }}
+        onError={() => { setWebError(true); }}
+        onRenderProcessGone={() => { setWebError(true); }}
+        onContentProcessDidTerminate={() => { setWebError(true); }}
         source={{ html, baseUrl: 'http://tjxy.app/' }}
         style={{ flex: 1, backgroundColor: 'transparent' }}
         onShouldStartLoadWithRequest={(request) => {
@@ -230,6 +266,6 @@ export default function WebHomeScreen() {
           return false;
         }}
       />
-    </View>
+    </SafeAreaView>
   );
 }
