@@ -78,6 +78,8 @@ export default function WebHomeScreen() {
   const fetchControllers = useRef(new Map<string, AbortController>());
   const lastPlayAt = useRef(0);
   const [html, setHtml] = useState<string>();
+  const pageScript = useRef('');
+  const scriptLoaded = useRef(false);
   const [loadError, setLoadError] = useState(false);
   const [webError, setWebError] = useState(false);
   const [attempt, setAttempt] = useState(0);
@@ -104,6 +106,7 @@ export default function WebHomeScreen() {
     setLoadError(false);
     setWebError(false);
     setHtml(undefined);
+    scriptLoaded.current = false;
     setAttempt((value) => value + 1);
   }
 
@@ -115,13 +118,29 @@ export default function WebHomeScreen() {
         await asset.downloadAsync();
         const uri = asset.localUri ?? asset.uri;
         const content = await FileSystem.readAsStringAsync(uri);
-        if (active) setHtml(content);
+        const script = content.match(/<script type="module">([\s\S]*?)<\/script>/);
+        if (!script) throw new Error('Application script is missing.');
+        if (active) {
+          pageScript.current = script[1]!;
+          setHtml(content.replace(script[0], ''));
+        }
       } catch {
         if (active) setLoadError(true);
       }
     })();
     return () => { active = false; };
   }, [attempt]);
+
+  const loadPageScript = useCallback(() => {
+    if (scriptLoaded.current || !webRef.current) return;
+    scriptLoaded.current = true;
+    webRef.current.injectJavaScript('window.__tjxyScriptParts = []; true;');
+    const script = pageScript.current;
+    for (let offset = 0; offset < script.length; offset += CHUNK_BYTES) {
+      webRef.current.injectJavaScript(`window.__tjxyScriptParts.push(${JSON.stringify(script.slice(offset, offset + CHUNK_BYTES))}); true;`);
+    }
+    webRef.current.injectJavaScript('eval(window.__tjxyScriptParts.join("")); delete window.__tjxyScriptParts; true;');
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -256,6 +275,7 @@ export default function WebHomeScreen() {
         onError={() => { setWebError(true); }}
         onRenderProcessGone={() => { setWebError(true); }}
         onContentProcessDidTerminate={() => { setWebError(true); }}
+        onLoadEnd={loadPageScript}
         source={{ html, baseUrl: 'http://tjxy.app/app/' }}
         style={{ flex: 1, backgroundColor: 'transparent' }}
         onShouldStartLoadWithRequest={(request) => {
