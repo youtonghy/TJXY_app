@@ -38,13 +38,24 @@ function shutdown(code) {
 process.on('SIGINT', () => shutdown(130));
 process.on('SIGTERM', () => shutdown(143));
 
-const vite = run(npm, ['run', 'dev', '--', '--port', String(DEV_PORT), '--strictPort', '--host', '127.0.0.1'], {
-  cwd: adminDir,
-  env: { ...process.env, VITE_TJXY_SHELL: 'desktop' },
-});
-vite.on('exit', (code) => {
-  if (code && code !== 0) shutdown(code);
-});
+function portIsOpen(port) {
+  return new Promise((resolvePort) => {
+    const socket = createConnection({ host: '127.0.0.1', port });
+    socket.once('connect', () => { socket.end(); resolvePort(true); });
+    socket.once('error', () => { socket.destroy(); resolvePort(false); });
+  });
+}
+
+let vite;
+if (!(await portIsOpen(DEV_PORT))) {
+  vite = run(npm, ['run', 'dev', '--', '--port', String(DEV_PORT), '--strictPort', '--host', '127.0.0.1'], {
+    cwd: adminDir,
+    env: { ...process.env, VITE_TJXY_SHELL: 'desktop' },
+  });
+  vite.on('exit', (code) => {
+    if (code && code !== 0) shutdown(code);
+  });
+}
 
 function waitForPort(port, deadline = Date.now() + 60_000) {
   return new Promise((resolvePromise, rejectPromise) => {
