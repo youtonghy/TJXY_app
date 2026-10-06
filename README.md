@@ -16,7 +16,7 @@ Package manager: **pnpm** (see `packageManager` in the root `package.json`).
 
 - `packages/client-api` — shared fetch client (configurable origin)
 - `apps/mobile` — Expo shell around the bundled `/app` web frontend + native player
-- `apps/desktop` — Tauri 2 wrapping the same bundled `/app` frontend + native mpv player
+- `apps/desktop` — Electron shell around the same bundled `/app` frontend + a native mpv player helper (`apps/desktop/player`, a standalone Rust binary spawned over stdio)
 
 Both shells bundle the sibling `../TJXY/admin` `/app` UI locally and only load
 runtime data (catalog, account, images, media streams) from the configured
@@ -105,21 +105,22 @@ Set the server address on the login screen. The address and an optionally rememb
 are stored on the device; passwords are never persisted. Language and light/dark preferences are
 device-local and remain selected after a restart.
 
-Playback never uses the web player page. An initialization script intercepts the web client's
+Playback never uses the web player page. A preload script intercepts the web client's
 navigation to `/app/play/:id`, keeps the main window on the current page, and passes the item id
-and signed-in session to the `desktop_player_open` command (a "remember me" session restored after
+and signed-in session to the Electron main process (a "remember me" session restored after
 a restart has no token in web storage, so the player reads the server's `tjxy_session` cookie from
-the HTTP plugin's persisted cookie jar instead). A dedicated native window then fetches
-the item, playback info and a playback ticket from the server itself and plays the stream with the
-bundled libmpv. The window has native macOS chrome: a QuickTime-style translucent control bar
-(volume, ±15 s, play/pause, scrubber with elapsed/remaining time, an audio/subtitle/speed menu and
-fullscreen) that hides after 3 s of inactivity while playing and lifts subtitles above itself when
-shown. Double-click toggles fullscreen and mpv's default keys still work (space, arrows, `f`, `j`,
+the persisted Electron session instead). The main process spawns `tjxy-player`, a standalone Rust
+helper that opens its own window, fetches the item, playback info and a playback ticket from the
+server itself, and plays the stream with libmpv. On macOS the window has native AppKit chrome: a
+QuickTime-style translucent control bar (volume, ±15 s, play/pause, scrubber with
+elapsed/remaining time, an audio/subtitle/speed menu and fullscreen) that hides after 3 s of
+inactivity while playing and lifts subtitles above itself when shown. On Windows and Linux mpv's
+built-in on-screen controller provides the same controls; winit forwards keyboard, mouse and wheel
+input to it. Double-click toggles fullscreen and mpv's default keys still work (space, arrows, `f`, `j`,
 `#`, `q` to close). The
 player resumes at the saved position, falls back to the next direct-play source when one fails,
 loads the server's external subtitles, reports start/progress/stop, marks the item watched and
-closes at the end, and revokes its ticket on exit. The native player is currently available on
-macOS only.
+closes at the end, and revokes its ticket on exit.
 
 ## Browser `/app`
 

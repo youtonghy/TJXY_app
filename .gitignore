@@ -1,6 +1,8 @@
 node_modules
-apps/desktop/src-tauri/runtime/*/lib/
-apps/desktop/src-tauri/runtime/*/manifest.sha256
+apps/desktop/player/runtime/*/lib/
+apps/desktop/player/runtime/*/manifest.sha256
+apps/desktop/player-bin/
+apps/desktop/release/
 dist
 target
 .expo

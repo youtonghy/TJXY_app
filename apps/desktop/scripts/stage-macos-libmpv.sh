@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-root_dir="$(cd "$(dirname "$0")/.." && pwd)"
+root_dir="$(cd "$(dirname "$0")/../player" && pwd)"
 runtime_dir="$root_dir/runtime/macos-aarch64"
 lib_dir="$runtime_dir/lib"
 mpv_prefix="${TJXY_MPV_PREFIX:-$(brew --prefix mpv)}"

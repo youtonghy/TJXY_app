@@ -3,7 +3,7 @@
 // session are handed to the dedicated native player window instead, and the
 // page stays where it was. Session values are read from the storage keys the
 // /app client writes (tjxy.api.baseUrl, tjxy.web.token). The token is empty
-// for a "remember me" session restored after a restart; the native side then
+// for a "remember me" session restored after a restart; the main process then
 // falls back to the persisted session cookie.
 (function () {
   if (window.__tjxyPlayerInterceptInstalled) return;
@@ -24,7 +24,6 @@
     return { itemId: decodeURIComponent(match[1]), search: parsed.search };
   }
 
-  // WKWebView ignores window.alert, so failures are shown as an in-page notice.
   function showError(message) {
     console.error('[tjxy-player] ' + message);
     var notice = document.createElement('div');
@@ -38,8 +37,7 @@
   }
 
   function openNativePlayer(target) {
-    var internals = window.__TAURI_INTERNALS__;
-    if (!internals || typeof internals.invoke !== 'function') {
+    if (!window.tjxyDesktop || typeof window.tjxyDesktop.playerOpen !== 'function') {
       showError('桌面运行时不可用。');
       return;
     }
@@ -48,7 +46,7 @@
       accessToken: window.sessionStorage.getItem('tjxy.web.token') || '',
       itemId: target.itemId,
     };
-    internals.invoke('desktop_player_open', { request: request }).catch(function (error) {
+    window.tjxyDesktop.playerOpen(request).catch(function (error) {
       showError(typeof error === 'string' ? error : (error && error.message) || '未知错误');
     });
   }
@@ -78,6 +76,10 @@
       '',
       '/app/items/' + encodeURIComponent(initial.itemId) + (libraryId ? '?libraryId=' + encodeURIComponent(libraryId) : ''),
     );
-    window.addEventListener('DOMContentLoaded', function () { openNativePlayer(initial); }, { once: true });
+    if (document.readyState === 'loading') {
+      window.addEventListener('DOMContentLoaded', function () { openNativePlayer(initial); }, { once: true });
+    } else {
+      openNativePlayer(initial);
+    }
   }
 })();

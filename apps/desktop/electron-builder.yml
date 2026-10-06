@@ -1,0 +1,60 @@
+appId: com.tjxy.desktop
+productName: TJXY
+copyright: Copyright © TJXY
+
+directories:
+  output: release
+
+files:
+  - electron/**
+  - dist/**
+  - package.json
+  - "!player/**"
+  - "!player-bin/**"
+  - "!src-tauri/**"
+  - "!target/**"
+  - "!release/**"
+  - "!scripts/**"
+  - "!icons/**"
+  - "!Cargo.toml"
+  - "!Cargo.lock"
+
+extraResources:
+  - from: player-bin
+    to: player
+
+asar: true
+
+mac:
+  category: public.app-category.video
+  icon: icons/icon.icns
+  # Releases are unsigned, matching the old Tauri artifacts.
+  identity: null
+  target:
+    - dmg
+
+win:
+  icon: icons/icon.ico
+  target:
+    - nsis
+    - msi
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  artifactName: ${productName}-${version}-setup-${arch}.${ext}
+
+msi:
+  upgradeCode: '8f3a2c1e-5b7d-4a9f-9c2e-1d6b8a4f7e3c'
+  artifactName: ${productName}-${version}-setup-${arch}.${ext}
+
+linux:
+  category: Video
+  icon: icons
+  target:
+    - AppImage
+    - deb
+
+deb:
+  depends:
+    - libmpv2

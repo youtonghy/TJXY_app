@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 fn main() {
     configure_libmpv_linking();
-    tauri_build::build()
 }
 
 fn configure_libmpv_linking() {
@@ -13,6 +12,8 @@ fn configure_libmpv_linking() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let platform_dir = if target == "aarch64-apple-darwin" {
         Some("macos-aarch64")
+    } else if target == "x86_64-apple-darwin" {
+        Some("macos-x86_64")
     } else if target == "x86_64-pc-windows-msvc" {
         Some("windows-x86_64")
     } else if target == "aarch64-pc-windows-msvc" {
@@ -33,14 +34,22 @@ fn configure_libmpv_linking() {
     if let Some(lib_dir) = lib_dir {
         println!("cargo:rustc-link-search=native={}", lib_dir.display());
         if target.contains("apple-darwin") {
+            // Absolute path keeps `cargo run/test` working in this checkout.
             println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_dir.display());
-            println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Resources/runtime/macos-aarch64/lib");
+            // In the packaged app the helper lands in Contents/Resources/
+            // player/tjxy-player, so @executable_path is that directory and
+            // the staged runtime sits next to it.
+            if let Some(dir) = platform_dir {
+                println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/runtime/{dir}/lib");
+            }
         }
     } else if target == "aarch64-apple-darwin" {
         let homebrew = PathBuf::from("/opt/homebrew/opt/mpv/lib");
         if homebrew.join("libmpv.2.dylib").exists() {
             println!("cargo:rustc-link-search=native={}", homebrew.display());
         }
+    } else if target.contains("windows") {
+        eprintln!("cargo:warning=libmpv not found; set TJXY_LIBMPV_DIR or stage runtime/{platform_dir:?}/lib");
     }
 }
 

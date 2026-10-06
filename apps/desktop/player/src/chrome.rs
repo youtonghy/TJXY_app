@@ -3,26 +3,31 @@
 //! loading/error overlay. Controls send `Control` actions to the worker; the
 //! worker pushes `UiState` snapshots back through `update`.
 
-use super::{Control, Status, Track, TrackKind, UiState, WorkerCommand};
+use crate::gcd;
+use crate::types::{Control, Status, Track, TrackKind, UiState, WorkerCommand};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
-use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
+use objc2::{
+    define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly,
+};
 use objc2_app_kit::{
-    NSApplication, NSAutoresizingMaskOptions, NSButton, NSColor, NSControlSize, NSCursor,
-    NSEvent, NSEventModifierFlags, NSEventType, NSFont, NSFontWeightRegular, NSFontWeightSemibold,
-    NSImage, NSImageScaling, NSImageSymbolConfiguration, NSMenu, NSMenuItem, NSProgressIndicator,
+    NSApplication, NSAutoresizingMaskOptions, NSButton, NSColor, NSControlSize, NSCursor, NSEvent,
+    NSEventModifierFlags, NSEventType, NSFont, NSFontWeightRegular, NSFontWeightSemibold, NSImage,
+    NSImageScaling, NSImageSymbolConfiguration, NSMenu, NSMenuItem, NSProgressIndicator,
     NSProgressIndicatorStyle, NSResponder, NSSlider, NSTextAlignment, NSTextField, NSTrackingArea,
     NSTrackingAreaOptions, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
-    NSVisualEffectState, NSVisualEffectView, NSWindow,
+    NSVisualEffectState, NSVisualEffectView, NSWindowDidEnterFullScreenNotification,
+    NSWindowDidExitFullScreenNotification, NSWindowStyleMask,
 };
 use objc2_foundation::{
-    NSInteger, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+    NSInteger, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect,
+    NSSize, NSString,
 };
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
-use tauri::AppHandle;
 
 const SEEK_STEP: f64 = 15.0;
 const HIDE_AFTER: Duration = Duration::from_secs(3);
@@ -66,6 +71,9 @@ pub struct PlayerViewIvars {
     scrubbing: Cell<bool>,
     last_activity: Cell<Instant>,
     chrome_visible: Cell<bool>,
+    /// Shared with `Host`: NSWindow fullscreen notifications keep it fresh
+    /// so the worker can reconcile mpv's `fullscreen` property.
+    fullscreen: Arc<AtomicBool>,
 }
 
 define_class!(
@@ -195,11 +203,26 @@ define_class!(
             };
             self.send(control);
         }
+
+        #[unsafe(method(playerWindowEnteredFullscreen:))]
+        fn window_entered_fullscreen(&self, _note: &NSNotification) {
+            self.ivars().fullscreen.store(true, Ordering::Relaxed);
+        }
+
+        #[unsafe(method(playerWindowExitedFullscreen:))]
+        fn window_exited_fullscreen(&self, _note: &NSNotification) {
+            self.ivars().fullscreen.store(false, Ordering::Relaxed);
+        }
     }
 );
 
 impl PlayerView {
-    fn new(mtm: MainThreadMarker, frame: NSRect, sender: mpsc::Sender<WorkerCommand>) -> Retained<Self> {
+    fn new(
+        mtm: MainThreadMarker,
+        frame: NSRect,
+        sender: mpsc::Sender<WorkerCommand>,
+        fullscreen: Arc<AtomicBool>,
+    ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(PlayerViewIvars {
             sender,
             widgets: OnceCell::new(),
@@ -207,6 +230,7 @@ impl PlayerView {
             scrubbing: Cell::new(false),
             last_activity: Cell::new(Instant::now()),
             chrome_visible: Cell::new(true),
+            fullscreen,
         });
         // SAFETY: initWithFrame: is NSView's designated initializer.
         let view: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
@@ -236,7 +260,8 @@ impl PlayerView {
         let bounds = self.bounds();
         let video = NSView::initWithFrame(NSView::alloc(mtm), bounds);
         video.setAutoresizingMask(
-            NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
         );
         self.addSubview(&video);
 
@@ -254,11 +279,39 @@ impl PlayerView {
         self.addSubview(&bar);
 
         let target: &AnyObject = self.as_ref();
-        let mute = symbol_button(mtm, "speaker.wave.2.fill", "静音", 13.0, target, sel!(toggleMute:));
-        let back = symbol_button(mtm, "gobackward.15", "后退 15 秒", 17.0, target, sel!(seekBack:));
+        let mute = symbol_button(
+            mtm,
+            "speaker.wave.2.fill",
+            "静音",
+            13.0,
+            target,
+            sel!(toggleMute:),
+        );
+        let back = symbol_button(
+            mtm,
+            "gobackward.15",
+            "后退 15 秒",
+            17.0,
+            target,
+            sel!(seekBack:),
+        );
         let play = symbol_button(mtm, "play.fill", "播放", 24.0, target, sel!(togglePlay:));
-        let forward = symbol_button(mtm, "goforward.15", "前进 15 秒", 17.0, target, sel!(seekForward:));
-        let tracks = symbol_button(mtm, "captions.bubble", "音轨与字幕", 15.0, target, sel!(showTracks:));
+        let forward = symbol_button(
+            mtm,
+            "goforward.15",
+            "前进 15 秒",
+            17.0,
+            target,
+            sel!(seekForward:),
+        );
+        let tracks = symbol_button(
+            mtm,
+            "captions.bubble",
+            "音轨与字幕",
+            15.0,
+            target,
+            sel!(showTracks:),
+        );
         let fullscreen = symbol_button(
             mtm,
             "arrow.up.left.and.arrow.down.right",
@@ -304,7 +357,8 @@ impl PlayerView {
             bar.addSubview(view);
         }
 
-        let spinner = NSProgressIndicator::initWithFrame(NSProgressIndicator::alloc(mtm), NSRect::ZERO);
+        let spinner =
+            NSProgressIndicator::initWithFrame(NSProgressIndicator::alloc(mtm), NSRect::ZERO);
         spinner.setStyle(NSProgressIndicatorStyle::Spinning);
         spinner.setControlSize(NSControlSize::Regular);
         spinner.setDisplayedWhenStopped(false);
@@ -312,7 +366,9 @@ impl PlayerView {
         let message = NSTextField::wrappingLabelWithString(&NSString::from_str(""), mtm);
         message.setAlignment(NSTextAlignment::Center);
         message.setTextColor(Some(&NSColor::colorWithWhite_alpha(1.0, 0.9)));
-        message.setFont(Some(&NSFont::systemFontOfSize_weight(14.0, unsafe { NSFontWeightSemibold })));
+        message.setFont(Some(&NSFont::systemFontOfSize_weight(14.0, unsafe {
+            NSFontWeightSemibold
+        })));
         self.addSubview(&message);
 
         let _ = self.ivars().widgets.set(Widgets {
@@ -340,7 +396,8 @@ impl PlayerView {
             return;
         };
         let bounds = self.bounds().size;
-        let width = (bounds.width - BAR_MARGIN * 2.0).clamp(BAR_MIN_WIDTH.min(bounds.width), BAR_MAX_WIDTH);
+        let width =
+            (bounds.width - BAR_MARGIN * 2.0).clamp(BAR_MIN_WIDTH.min(bounds.width), BAR_MAX_WIDTH);
         w.bar.setFrame(rect(
             (bounds.width - width) / 2.0,
             bounds.height - BAR_HEIGHT - BAR_MARGIN,
@@ -358,9 +415,15 @@ impl PlayerView {
         w.fullscreen.setFrame(rect(width - 40.0, 38.0, 28.0, 26.0));
         w.elapsed.setFrame(rect(12.0, 10.0, 64.0, 16.0));
         w.remaining.setFrame(rect(width - 76.0, 10.0, 64.0, 16.0));
-        w.seek.setFrame(rect(80.0, 7.0, (width - 160.0).max(40.0), 22.0));
+        w.seek
+            .setFrame(rect(80.0, 7.0, (width - 160.0).max(40.0), 22.0));
 
-        w.spinner.setFrame(rect(bounds.width / 2.0 - 16.0, bounds.height / 2.0 - 16.0, 32.0, 32.0));
+        w.spinner.setFrame(rect(
+            bounds.width / 2.0 - 16.0,
+            bounds.height / 2.0 - 16.0,
+            32.0,
+            32.0,
+        ));
         let message_width = (bounds.width - 80.0).clamp(160.0, 520.0);
         w.message.setFrame(rect(
             (bounds.width - message_width) / 2.0,
@@ -413,18 +476,35 @@ impl PlayerView {
             Status::Loading(text) | Status::Error(text) => Some(text.as_str()),
             Status::Ready => state.notice.as_deref(),
         };
-        w.message.setStringValue(&NSString::from_str(message.unwrap_or("")));
+        w.message
+            .setStringValue(&NSString::from_str(message.unwrap_or("")));
         w.message.setHidden(message.is_none());
 
-        set_symbol(&w.play, if state.paused { "play.fill" } else { "pause.fill" }, 24.0);
+        set_symbol(
+            &w.play,
+            if state.paused {
+                "play.fill"
+            } else {
+                "pause.fill"
+            },
+            24.0,
+        );
         set_symbol(
             &w.mute,
-            if state.muted || state.volume <= 0.0 { "speaker.slash.fill" } else { "speaker.wave.2.fill" },
+            if state.muted || state.volume <= 0.0 {
+                "speaker.slash.fill"
+            } else {
+                "speaker.wave.2.fill"
+            },
             13.0,
         );
         set_symbol(
             &w.fullscreen,
-            if state.fullscreen { "arrow.down.right.and.arrow.up.left" } else { "arrow.up.left.and.arrow.down.right" },
+            if state.fullscreen {
+                "arrow.down.right.and.arrow.up.left"
+            } else {
+                "arrow.up.left.and.arrow.down.right"
+            },
             13.0,
         );
         w.volume.setDoubleValue(state.volume);
@@ -437,10 +517,14 @@ impl PlayerView {
         if !self.ivars().scrubbing.get() {
             w.seek.setMaxValue(state.duration.max(1.0));
             w.seek.setDoubleValue(state.position);
-            w.elapsed.setStringValue(&NSString::from_str(&format_time(state.position)));
+            w.elapsed
+                .setStringValue(&NSString::from_str(&format_time(state.position)));
         }
         let remaining = if state.duration > 0.0 {
-            format!("-{}", format_time((state.duration - state.position).max(0.0)))
+            format!(
+                "-{}",
+                format_time((state.duration - state.position).max(0.0))
+            )
         } else {
             String::new()
         };
@@ -449,9 +533,12 @@ impl PlayerView {
         let idle = self.ivars().last_activity.get().elapsed() >= HIDE_AFTER;
         let pointer_over_bar = self
             .window()
-            .map(|window| self.convertPoint_fromView(window.mouseLocationOutsideOfEventStream(), None))
+            .map(|window| {
+                self.convertPoint_fromView(window.mouseLocationOutsideOfEventStream(), None)
+            })
             .is_some_and(|point| contains(w.bar.frame(), point));
-        let hide = ready && !state.paused && idle && !pointer_over_bar && !self.ivars().scrubbing.get();
+        let hide =
+            ready && !state.paused && idle && !pointer_over_bar && !self.ivars().scrubbing.get();
         self.set_chrome_visible(!hide);
         *self.ivars().state.borrow_mut() = Some(state);
     }
@@ -464,26 +551,48 @@ impl PlayerView {
         let tracks: &[Track] = state.as_ref().map_or(&[], |state| state.tracks.as_slice());
         let speed = state.as_ref().map_or(1.0, |state| state.speed);
 
-        let audio: Vec<&Track> = tracks.iter().filter(|track| track.kind == TrackKind::Audio).collect();
+        let audio: Vec<&Track> = tracks
+            .iter()
+            .filter(|track| track.kind == TrackKind::Audio)
+            .collect();
         self.add_header(&menu, "音频");
         if audio.is_empty() {
             self.add_item(&menu, "无", 0, false, false);
         }
         for track in audio {
-            self.add_item(&menu, &track.label, AUDIO_TAG + track.id as NSInteger, track.selected, true);
+            self.add_item(
+                &menu,
+                &track.label,
+                AUDIO_TAG + track.id as NSInteger,
+                track.selected,
+                true,
+            );
         }
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         self.add_header(&menu, "字幕");
-        let subtitles: Vec<&Track> = tracks.iter().filter(|track| track.kind == TrackKind::Subtitle).collect();
+        let subtitles: Vec<&Track> = tracks
+            .iter()
+            .filter(|track| track.kind == TrackKind::Subtitle)
+            .collect();
         let any_selected = subtitles.iter().any(|track| track.selected);
         self.add_item(&menu, "关闭", SUBTITLE_OFF_TAG, !any_selected, true);
         for track in subtitles {
-            self.add_item(&menu, &track.label, SUBTITLE_TAG + track.id as NSInteger, track.selected, true);
+            self.add_item(
+                &menu,
+                &track.label,
+                SUBTITLE_TAG + track.id as NSInteger,
+                track.selected,
+                true,
+            );
         }
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         self.add_header(&menu, "播放速度");
         for value in SPEEDS {
-            let label = if value == 1.0 { "正常".to_string() } else { format!("{value}×") };
+            let label = if value == 1.0 {
+                "正常".to_string()
+            } else {
+                format!("{value}×")
+            };
             let tag = SPEED_TAG + (value * 100.0).round() as NSInteger;
             self.add_item(&menu, &label, tag, (speed - value).abs() < 0.01, true);
         }
@@ -501,7 +610,11 @@ impl PlayerView {
             let item = NSMenuItem::initWithTitle_action_keyEquivalent(
                 NSMenuItem::alloc(mtm),
                 &NSString::from_str(title),
-                if enabled { Some(sel!(selectMenuItem:)) } else { None },
+                if enabled {
+                    Some(sel!(selectMenuItem:))
+                } else {
+                    None
+                },
                 &NSString::from_str(""),
             );
             item.setTarget(Some(self.as_ref()));
@@ -514,70 +627,78 @@ impl PlayerView {
     }
 }
 
-/// Adds the player view to the window and returns the video view pointer for
-/// the OpenGL surface. Both are retained by the view hierarchy and by the
-/// main-thread registry until `detach`.
+/// Adds the player view to the window's content view and returns the video
+/// view pointer for the OpenGL surface. Called on the main thread during
+/// window setup; the view is retained by the view hierarchy and the registry
+/// until `detach`.
 pub fn attach(
-    app: &AppHandle,
-    window: &tauri::Window,
+    parent: usize,
     id: &str,
     sender: mpsc::Sender<WorkerCommand>,
+    fullscreen: Arc<AtomicBool>,
 ) -> Result<usize, String> {
-    let ns_window = window.ns_window().map_err(|error| error.to_string())? as usize;
-    let id = id.to_string();
-    let (result_sender, result) = mpsc::sync_channel(1);
-    app.run_on_main_thread(move || {
-        let outcome = (|| {
-            let mtm = MainThreadMarker::new()
-                .ok_or_else(|| "player view must be created on the main thread".to_string())?;
-            // SAFETY: the pointer comes from a live Tauri window on the main thread.
-            let window = unsafe { Retained::retain(ns_window as *mut NSWindow) }
-                .ok_or_else(|| "player NSWindow is unavailable".to_string())?;
-            let content = window
-                .contentView()
-                .ok_or_else(|| "player content view is unavailable".to_string())?;
-            let view = PlayerView::new(mtm, content.bounds(), sender);
-            view.setAutoresizingMask(
-                NSAutoresizingMaskOptions::ViewWidthSizable
-                    | NSAutoresizingMaskOptions::ViewHeightSizable,
-            );
-            // SAFETY: the owner outlives the tracking area, which the view retains.
-            let tracking = unsafe {
-                NSTrackingArea::initWithRect_options_owner_userInfo(
-                    NSTrackingArea::alloc(),
-                    NSRect::ZERO,
-                    NSTrackingAreaOptions::MouseMoved
-                        | NSTrackingAreaOptions::ActiveInKeyWindow
-                        | NSTrackingAreaOptions::InVisibleRect,
-                    Some(&view),
-                    None,
-                )
-            };
-            view.addTrackingArea(&tracking);
-            content.addSubview(&view);
-            window.setAcceptsMouseMovedEvents(true);
-            window.makeFirstResponder(Some(&view));
-            let video = view
-                .ivars()
-                .widgets
-                .get()
-                .map(|widgets| Retained::as_ptr(&widgets.video) as usize)
-                .ok_or_else(|| "player video view is unavailable".to_string())?;
-            VIEWS.with(|views| views.borrow_mut().insert(id, view));
-            Ok(video)
-        })();
-        let _ = result_sender.send(outcome);
-    })
-    .map_err(|error| error.to_string())?;
-    result
-        .recv_timeout(Duration::from_secs(5))
-        .map_err(|_| "Timed out while creating the player view.".to_string())?
+    let mtm = MainThreadMarker::new()
+        .ok_or_else(|| "player view must be created on the main thread".to_string())?;
+    // SAFETY: `parent` is the winit window's content NSView, alive on the
+    // main thread for the duration of this call.
+    let parent_view = unsafe { Retained::retain(parent as *mut NSView) }
+        .ok_or_else(|| "player content view is unavailable".to_string())?;
+    let window = parent_view
+        .window()
+        .ok_or_else(|| "player NSWindow is unavailable".to_string())?;
+    let content = window
+        .contentView()
+        .ok_or_else(|| "player content view is unavailable".to_string())?;
+    let view = PlayerView::new(mtm, content.bounds(), sender, fullscreen);
+    view.setAutoresizingMask(
+        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
+    );
+    // SAFETY: the owner outlives the tracking area, which the view retains.
+    let tracking = unsafe {
+        NSTrackingArea::initWithRect_options_owner_userInfo(
+            NSTrackingArea::alloc(),
+            NSRect::ZERO,
+            NSTrackingAreaOptions::MouseMoved
+                | NSTrackingAreaOptions::ActiveInKeyWindow
+                | NSTrackingAreaOptions::InVisibleRect,
+            Some(&view),
+            None,
+        )
+    };
+    view.addTrackingArea(&tracking);
+    content.addSubview(&view);
+    window.setAcceptsMouseMovedEvents(true);
+    window.makeFirstResponder(Some(&view));
+    // Track native (green-button / toggleFullScreen) transitions.
+    unsafe {
+        let center = NSNotificationCenter::defaultCenter();
+        center.addObserver_selector_name_object(
+            view.as_ref(),
+            sel!(playerWindowEnteredFullscreen:),
+            Some(NSWindowDidEnterFullScreenNotification),
+            Some(&window),
+        );
+        center.addObserver_selector_name_object(
+            view.as_ref(),
+            sel!(playerWindowExitedFullscreen:),
+            Some(NSWindowDidExitFullScreenNotification),
+            Some(&window),
+        );
+    }
+    let video = view
+        .ivars()
+        .widgets
+        .get()
+        .map(|widgets| Retained::as_ptr(&widgets.video) as usize)
+        .ok_or_else(|| "player video view is unavailable".to_string())?;
+    VIEWS.with(|views| views.borrow_mut().insert(id.to_string(), view));
+    Ok(video)
 }
 
 /// Pushes a playback snapshot to the controls of player `id`.
-pub fn update(app: &AppHandle, id: &str, state: UiState) {
+pub fn update(id: &str, state: UiState) {
     let id = id.to_string();
-    let _ = app.run_on_main_thread(move || {
+    gcd::on_main(move || {
         let view = VIEWS.with(|views| views.borrow().get(&id).cloned());
         if let Some(view) = view {
             view.apply(state);
@@ -585,18 +706,48 @@ pub fn update(app: &AppHandle, id: &str, state: UiState) {
     });
 }
 
-/// Releases the registry's reference to player `id`'s view.
-pub fn detach(app: &AppHandle, id: &str) {
-    let id = id.to_string();
-    let _ = app.run_on_main_thread(move || {
-        VIEWS.with(|views| views.borrow_mut().remove(&id));
-    });
+/// Releases the registry's reference to player `id`'s view. Must run on the
+/// main thread (the registry is thread-local); called during app teardown.
+pub fn detach(id: &str) {
+    VIEWS.with(|views| views.borrow_mut().remove(id));
+}
+
+/// Drives the native fullscreen transition for `window` (a winit window).
+/// Returns false if the window handle could not be resolved so the caller
+/// can fall back to winit's own borderless mode.
+pub fn toggle_fullscreen(window: &winit::window::Window, fullscreen: bool) -> bool {
+    use raw_window_handle::HasWindowHandle;
+    let Ok(handle) = window.window_handle() else {
+        return false;
+    };
+    let raw_window_handle::RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return false;
+    };
+    // SAFETY: the view belongs to a live window on the main thread.
+    let view = unsafe { Retained::retain(appkit.ns_view.as_ptr() as *mut NSView) };
+    let Some(view) = view else { return false };
+    let Some(ns_window) = view.window() else {
+        return false;
+    };
+    if ns_window
+        .styleMask()
+        .contains(NSWindowStyleMask::FullScreen)
+        != fullscreen
+    {
+        ns_window.toggleFullScreen(None);
+    }
+    true
 }
 
 fn symbol_image(name: &str, point_size: f64) -> Option<Retained<NSImage>> {
-    let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(name), None)?;
+    let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+        &NSString::from_str(name),
+        None,
+    )?;
     let configuration =
-        NSImageSymbolConfiguration::configurationWithPointSize_weight(point_size, unsafe { NSFontWeightRegular });
+        NSImageSymbolConfiguration::configurationWithPointSize_weight(point_size, unsafe {
+            NSFontWeightRegular
+        });
     image.imageWithSymbolConfiguration(&configuration)
 }
 
@@ -614,9 +765,10 @@ fn symbol_button(
     target: &AnyObject,
     action: Sel,
 ) -> Retained<NSButton> {
-    let image = symbol_image(name, point_size).unwrap_or_else(|| NSImage::new());
+    let image = symbol_image(name, point_size).unwrap_or_default();
     // SAFETY: the target outlives the button; the action matches the selector.
-    let button = unsafe { NSButton::buttonWithImage_target_action(&image, Some(target), Some(action), mtm) };
+    let button =
+        unsafe { NSButton::buttonWithImage_target_action(&image, Some(target), Some(action), mtm) };
     button.setBordered(false);
     button.setImageScaling(NSImageScaling::ScaleNone);
     button.setContentTintColor(Some(&NSColor::whiteColor()));
@@ -629,12 +781,18 @@ fn time_label(mtm: MainThreadMarker, alignment: NSTextAlignment) -> Retained<NST
     let label = NSTextField::labelWithString(&NSString::from_str(""), mtm);
     label.setAlignment(alignment);
     label.setTextColor(Some(&NSColor::colorWithWhite_alpha(1.0, 0.8)));
-    label.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(11.0, unsafe { NSFontWeightRegular })));
+    label.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(
+        11.0,
+        unsafe { NSFontWeightRegular },
+    )));
     label
 }
 
 fn rect(x: f64, y: f64, width: f64, height: f64) -> NSRect {
-    NSRect::new(NSPoint::new(x, y), NSSize::new(width.max(0.0), height.max(0.0)))
+    NSRect::new(
+        NSPoint::new(x, y),
+        NSSize::new(width.max(0.0), height.max(0.0)),
+    )
 }
 
 fn contains(frame: NSRect, point: NSPoint) -> bool {
@@ -645,7 +803,11 @@ fn contains(frame: NSRect, point: NSPoint) -> bool {
 }
 
 fn format_time(seconds: f64) -> String {
-    let total = if seconds.is_finite() { seconds.max(0.0) as u64 } else { 0 };
+    let total = if seconds.is_finite() {
+        seconds.max(0.0) as u64
+    } else {
+        0
+    };
     let (hours, minutes, secs) = (total / 3600, total / 60 % 60, total % 60);
     if hours > 0 {
         format!("{hours}:{minutes:02}:{secs:02}")

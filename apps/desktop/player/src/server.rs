@@ -112,9 +112,7 @@ impl Session {
     }
 
     pub fn current_user_id(&self) -> Result<String, String> {
-        Ok(self
-            .json::<CurrentUser>(Method::GET, "/Users/Me", None)?
-            .id)
+        Ok(self.json::<CurrentUser>(Method::GET, "/Users/Me", None)?.id)
     }
 
     pub fn playback_info(&self, item_id: &str) -> Result<PlaybackInfo, String> {
@@ -184,7 +182,10 @@ impl Session {
             .send()
             .map_err(|error| format!("字幕下载失败：{error}"))?;
         if !response.status().is_success() {
-            return Err(format!("字幕下载失败（HTTP {}）", response.status().as_u16()));
+            return Err(format!(
+                "字幕下载失败（HTTP {}）",
+                response.status().as_u16()
+            ));
         }
         response
             .text()

@@ -103,31 +103,31 @@ jobs:
           - name: Windows x86_64
             runner: windows-latest
             target: x86_64-pc-windows-msvc
-            bundles: nsis,msi
+            builder_args: --win nsis msi --x64
             expected: windows
           - name: Windows ARM64
             # GitHub-hosted ARM64 Windows runners are not generally available
             # for public workflows; build the ARM64 target on x86_64 instead.
             runner: windows-latest
             target: aarch64-pc-windows-msvc
-            bundles: nsis,msi
+            builder_args: --win nsis msi --arm64
             expected: windows
           - name: macOS Apple Silicon
             runner: macos-latest
             target: aarch64-apple-darwin
-            bundles: dmg
+            builder_args: --mac dmg --arm64
             expected: dmg
           - name: Linux x86_64
             runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-            bundles: appimage,deb
+            builder_args: --linux AppImage deb --x64
             expected: linux
           - name: Linux ARM64
-            # Cross-compilation from the supported x86_64 hosted runner keeps
-            # this matrix runnable for repositories without ARM hosted runners.
-            runner: ubuntu-24.04
+            # Native ARM64 runner: cross-linking libmpv on x86_64 would need
+            # an aarch64 sysroot that apt multiarch does not provide.
+            runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            bundles: appimage,deb
+            builder_args: --linux AppImage deb --arm64
             expected: linux
     steps:
       - uses: actions/checkout@v6
@@ -151,7 +151,11 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+          sudo apt-get install -y libmpv-dev fuse libfuse2 patchelf xdg-utils
+      - name: Enable MSVC tools
+        # dumpbin/lib generate the mpv.lib import library for stage-runtime.
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -164,30 +168,21 @@ jobs:
         with:
           name: desktop-frontend
           path: TJXY_app/apps/desktop/dist
-      - name: Create CI Tauri config
-        working-directory: TJXY_app
+      - name: Build installer
+        working-directory: TJXY_app/apps/desktop
         env:
+          TJXY_SKIP_FRONTEND: '1'
+          TJXY_PLAYER_TARGET: ${{ matrix.target }}
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
-        run: node -e "const fs=require('fs'); const c=JSON.parse(fs.readFileSync('apps/desktop/src-tauri/tauri.release.conf.json','utf8')); c.version=process.env.RELEASE_VERSION; fs.writeFileSync('apps/desktop/src-tauri/tauri.ci.conf.json', JSON.stringify(c));"
-      - uses: tauri-apps/tauri-action@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          projectPath: TJXY_app/apps/desktop
-          tagName: ${{ needs.validate.outputs.tag }}
-          releaseName: TJXY v${{ needs.validate.outputs.version }}
-          releaseBody: Desktop bundles for TJXY v${{ needs.validate.outputs.version }}.
-          releaseDraft: true
-          prerelease: false
-          args: >-
-            --target ${{ matrix.target }}
-            --bundles ${{ matrix.bundles }}
-            --config src-tauri/tauri.ci.conf.json
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node scripts/build.mjs ${{ matrix.builder_args }} -c.extraMetadata.version="$RELEASE_VERSION" --publish never
       - name: Verify expected bundles
         working-directory: TJXY_app
         shell: bash
         run: |
-          bundle_dir="apps/desktop/target/${{ matrix.target }}/release/bundle"
+          bundle_dir="apps/desktop/release"
           test -d "$bundle_dir"
           case "${{ matrix.expected }}" in
             windows)
@@ -200,3 +195,11 @@ jobs:
               find "$bundle_dir" -type f -name '*.deb' -print -quit | grep -q .
               ;;
           esac
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          tag_name: ${{ needs.validate.outputs.tag }}
+          name: TJXY v${{ needs.validate.outputs.version }}
+          body: Desktop bundles for TJXY v${{ needs.validate.outputs.version }}.
+          files: TJXY_app/apps/desktop/release/*

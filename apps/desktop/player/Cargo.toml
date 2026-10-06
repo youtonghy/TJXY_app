@@ -1,31 +1,25 @@
 [package]
-name = "tjxy-desktop"
-version = "0.0.0"
-description = "TJXY desktop client"
+name = "tjxy-player"
+version = "0.1.0"
+description = "TJXY native mpv playback helper for the Electron desktop app"
 authors = ["TJXY"]
 edition = "2021"
 
-[lib]
-name = "tjxy_desktop_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
-
-[build-dependencies]
-tauri-build = { version = "2", features = [] }
+[[bin]]
+name = "tjxy-player"
+path = "src/main.rs"
 
 [dependencies]
-tauri = { version = "2", features = ["unstable"] }
-tauri-plugin-http = "2"
 libmpv2 = "6.0.0"
 glutin = { version = "0.32.3", default-features = false }
 raw-window-handle = "0.6.2"
+winit = "0.30"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-cookie_store = { version = "0.22", default-features = false, features = ["serde"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-zip = { version = "2", default-features = false, features = ["deflate"] }
 uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSButton", "NSCell", "NSColor", "NSControl", "NSCursor", "NSEvent", "NSFont", "NSFontDescriptor", "NSGraphics", "NSImage", "NSMenu", "NSMenuItem", "NSProgressIndicator", "NSResponder", "NSSlider", "NSText", "NSTextField", "NSTrackingArea", "NSView", "NSVisualEffectView", "NSWindow", "NSAnimation", "NSUserInterfaceItemIdentification"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSObject"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSObject", "NSNotification", "NSString"] }

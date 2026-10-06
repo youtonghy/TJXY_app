@@ -2,15 +2,13 @@
   "name": "desktop",
   "version": "0.0.0",
   "private": true,
+  "main": "electron/main.cjs",
   "scripts": {
-    "dev": "tauri dev",
-    "build": "tauri build"
+    "dev": "node scripts/dev.mjs",
+    "build": "node scripts/build.mjs"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.9.0"
-  },
-  "dependencies": {
-    "@tauri-apps/api": "^2.9.0",
-    "@tauri-apps/plugin-http": "^2.5.0"
+    "electron": "44.5.1",
+    "electron-builder": "^26.15.3"
   }
 }

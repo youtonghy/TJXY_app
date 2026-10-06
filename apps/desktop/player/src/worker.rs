@@ -1,13 +1,21 @@
-//! macOS player worker: owns the OpenGL surface and libmpv, drives the
+//! Render worker: owns the OpenGL surface and libmpv, drives the
 //! load → ticket → play state machine and reports playback to the server.
+//! Ports the former `player/macos.rs` to a platform-neutral host: window
+//! events arrive as `WorkerCommand`s and window requests go through `Host`.
+//!
+//! On macOS the AppKit chrome (`chrome.rs`) renders the control bar and mpv's
+//! own OSD/OSC is disabled; elsewhere mpv's built-in OSC draws the controls
+//! inside the video surface and winit input is forwarded as mpv commands.
 
-use super::{macos_view, Control, Media, Status, Track, TrackKind, UiState, WorkerCommand};
+use crate::app::Host;
+#[cfg(target_os = "macos")]
+use crate::chrome;
 use crate::server::{
     playable_sources, PlaybackReport, PlaybackSource, PlaybackState, PlaybackTicket, Session,
 };
-use std::ffi::{c_void, CString};
+use crate::types::{Control, Media, Status, Track, TrackKind, UiState, WorkerCommand};
+use std::ffi::c_void;
 use std::num::NonZeroU32;
-use std::ptr::NonNull;
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -19,29 +27,62 @@ const NOTICE_DURATION: Duration = Duration::from_secs(4);
 const DEFAULT_SUB_MARGIN: f64 = 22.0;
 
 pub struct Context {
-    pub app: tauri::AppHandle,
-    pub id: String,
-    pub window: tauri::Window,
+    /// NSView (macOS, the video subview created by the chrome) / HWND / XID.
+    pub window_handle: raw_window_handle::RawWindowHandle,
+    pub display_handle: raw_window_handle::RawDisplayHandle,
+    /// Initial framebuffer size in physical pixels.
+    pub width: NonZeroU32,
+    pub height: NonZeroU32,
     pub session: Session,
     pub item_id: String,
-    pub view: usize,
+    pub host: Host,
+    /// Chrome registry id (macOS only; empty elsewhere).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub view_id: String,
     pub receiver: mpsc::Receiver<WorkerCommand>,
     pub sender: mpsc::Sender<WorkerCommand>,
 }
 
+// The context crosses to the render thread exactly once. The raw window /
+// display handles are only read there to create the GL surface — the same
+// arrangement the Tauri version used — so sending them is sound.
+unsafe impl Send for Context {}
+
+/// Preferred GL display API per platform. WGL and GLX need extra parameters
+/// (window handle / X11 error hook), so this is a function, not a constant.
+#[cfg(target_os = "macos")]
+fn display_api(
+    _window_handle: raw_window_handle::RawWindowHandle,
+) -> glutin::display::DisplayApiPreference {
+    glutin::display::DisplayApiPreference::Cgl
+}
+#[cfg(target_os = "windows")]
+fn display_api(
+    window_handle: raw_window_handle::RawWindowHandle,
+) -> glutin::display::DisplayApiPreference {
+    glutin::display::DisplayApiPreference::Wgl(Some(window_handle))
+}
+#[cfg(all(unix, not(target_os = "macos")))]
+fn display_api(
+    _window_handle: raw_window_handle::RawWindowHandle,
+) -> glutin::display::DisplayApiPreference {
+    glutin::display::DisplayApiPreference::EglThenGlx(None)
+}
+
+/// The AppKit chrome replaces mpv's on-screen controller on macOS; on other
+/// platforms the OSC is the player UI.
+const USE_NATIVE_CHROME: bool = cfg!(target_os = "macos");
+
 pub fn run(context: Context) -> Result<(), String> {
     use glutin::config::ConfigTemplateBuilder;
     use glutin::context::{ContextApi, ContextAttributesBuilder, NotCurrentGlContext, Version};
-    use glutin::display::{Display, DisplayApiPreference, GlDisplay};
+    use glutin::display::{Display, GlDisplay};
     use glutin::prelude::*;
     use glutin::surface::{GlSurface, SurfaceAttributesBuilder, WindowSurface};
     use libmpv2::events::Event;
     use libmpv2::mpv_end_file_reason;
     use libmpv2::render::{mpv_render_update, OpenGLInitParams, RenderParam, RenderParamApiType};
     use libmpv2::Mpv;
-    use raw_window_handle::{
-        AppKitDisplayHandle, AppKitWindowHandle, RawDisplayHandle, RawWindowHandle,
-    };
 
     fn get_proc_address(display: &Display, name: &str) -> *mut c_void {
         CString::new(name)
@@ -49,23 +90,22 @@ pub fn run(context: Context) -> Result<(), String> {
             .map(|name| display.get_proc_address(&name) as *mut c_void)
             .unwrap_or(std::ptr::null_mut())
     }
+    use std::ffi::CString;
 
     let Context {
-        app,
-        id,
-        window,
+        window_handle,
+        display_handle,
+        width,
+        height,
         session,
         item_id,
-        view,
+        host,
+        view_id,
         receiver,
         sender,
     } = context;
 
-    let view = NonNull::new(view as *mut c_void)
-        .ok_or_else(|| "native player view is invalid".to_string())?;
-    let raw_window = RawWindowHandle::AppKit(AppKitWindowHandle::new(view));
-    let raw_display = RawDisplayHandle::AppKit(AppKitDisplayHandle::new());
-    let display = unsafe { Display::new(raw_display, DisplayApiPreference::Cgl) }
+    let display = unsafe { Display::new(display_handle, display_api(window_handle)) }
         .map_err(|error| format!("OpenGL display: {error}"))?;
     let template = ConfigTemplateBuilder::new().with_alpha_size(8).build();
     let config = unsafe { display.find_configs(template) }
@@ -74,22 +114,16 @@ pub fn run(context: Context) -> Result<(), String> {
         .ok_or_else(|| "No compatible OpenGL configuration was found.".to_string())?;
     let context_attributes = ContextAttributesBuilder::new()
         .with_context_api(ContextApi::OpenGl(Some(Version::new(3, 2))))
-        .build(Some(raw_window));
+        .build(Some(window_handle));
     let not_current = unsafe { display.create_context(&config, &context_attributes) }
         .map_err(|error| format!("OpenGL context: {error}"))?;
-    let size = window
-        .inner_size()
-        .map_err(|error| format!("player window size: {error}"))?;
-    let attributes = SurfaceAttributesBuilder::<WindowSurface>::new().build(
-        raw_window,
-        non_zero(size.width),
-        non_zero(size.height),
-    );
+    let attributes =
+        SurfaceAttributesBuilder::<WindowSurface>::new().build(window_handle, width, height);
     let surface = unsafe { display.create_window_surface(&config, &attributes) }
         .map_err(|error| format!("OpenGL surface: {error}"))?;
-    // glutin's CGL surface reads its size through a synchronous hop to the
-    // main thread, so the render size is tracked here from resize events.
-    let mut render_size = (non_zero(size.width), non_zero(size.height));
+    // The render size is tracked from resize events; glutin's surface may
+    // otherwise query the window on the wrong thread.
+    let mut render_size = (width, height);
     let gl_context = not_current
         .make_current(&surface)
         .map_err(|error| format!("OpenGL make current: {error}"))?;
@@ -99,9 +133,8 @@ pub fn run(context: Context) -> Result<(), String> {
         init.set_option("idle", "yes")?;
         init.set_option("force-window", "yes")?;
         init.set_option("keep-open", "no")?;
-        // Native AppKit controls replace mpv's on-screen controller and bars.
-        init.set_option("osc", false)?;
-        init.set_option("osd-bar", false)?;
+        init.set_option("osc", !USE_NATIVE_CHROME)?;
+        init.set_option("osd-bar", !USE_NATIVE_CHROME)?;
         init.set_option("osd-on-seek", "no")?;
         init.set_option("load-scripts", true)?;
         init.set_option("ytdl", false)?;
@@ -130,7 +163,7 @@ pub fn run(context: Context) -> Result<(), String> {
         .disable_deprecated_events()
         .map_err(|error| format!("mpv event setup: {error}"))?;
 
-    let mut controller = Controller::new(session, item_id, sender, window.clone(), app, id);
+    let mut controller = Controller::new(session, item_id, sender, host, view_id);
     controller.status = Status::Loading("正在加载…".into());
     controller.load_media();
     controller.push(&mpv);
@@ -158,7 +191,14 @@ pub fn run(context: Context) -> Result<(), String> {
                 language,
                 select,
                 result,
-            }) => controller.on_subtitle(&mpv, generation, &title, language.as_deref(), select, result),
+            }) => controller.on_subtitle(
+                &mpv,
+                generation,
+                &title,
+                language.as_deref(),
+                select,
+                result,
+            ),
             Ok(WorkerCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
@@ -238,7 +278,10 @@ struct Controller {
     session: Session,
     item_id: String,
     sender: mpsc::Sender<WorkerCommand>,
-    window: tauri::Window,
+    host: Host,
+    /// Chrome registry id (macOS only).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    view_id: String,
     reporter: Reporter,
     media: Option<Media>,
     active: Option<ActiveSource>,
@@ -246,8 +289,6 @@ struct Controller {
     position_ticks: i64,
     paused: bool,
     last_progress: Instant,
-    app: tauri::AppHandle,
-    id: String,
     status: Status,
     notice: Option<(String, Instant)>,
     fullscreen: bool,
@@ -258,24 +299,22 @@ impl Controller {
         session: Session,
         item_id: String,
         sender: mpsc::Sender<WorkerCommand>,
-        window: tauri::Window,
-        app: tauri::AppHandle,
-        id: String,
+        host: Host,
+        view_id: String,
     ) -> Self {
         Self {
             reporter: Reporter::new(session.clone()),
             session,
             item_id,
             sender,
-            window,
+            host,
+            view_id,
             media: None,
             active: None,
             generation: 0,
             position_ticks: 0,
             paused: false,
             last_progress: Instant::now(),
-            app,
-            id,
             status: Status::Loading(String::new()),
             notice: None,
             fullscreen: false,
@@ -290,7 +329,7 @@ impl Controller {
     fn fail(&mut self, message: &str) {
         eprintln!("player: {message}");
         self.status = Status::Error(message.to_string());
-        let _ = self.window.set_title(&format!("播放失败 · {message}"));
+        self.host.set_title(&format!("播放失败 · {message}"));
     }
 
     fn load_media(&self) {
@@ -304,7 +343,7 @@ impl Controller {
             Ok(media) => media,
             Err(error) => return self.fail(&error),
         };
-        let _ = self.window.set_title(&media.title);
+        self.host.set_title(&media.title);
         let _ = mpv.set_property("force-media-title", media.title.as_str());
         self.position_ticks = media.resume_ticks;
         let play_session_id = media.play_session_id.clone();
@@ -450,7 +489,12 @@ impl Controller {
             return self.fail(&message);
         };
         let media_source_id = active.media_source(self);
-        self.end_source(active.ticket, active.started, &media_source_id, active.play_session_id);
+        self.end_source(
+            active.ticket,
+            active.started,
+            &media_source_id,
+            active.play_session_id,
+        );
         let next = active.index + 1;
         if self.source(next).is_some() {
             self.begin_source(next, uuid::Uuid::new_v4().to_string());
@@ -494,9 +538,37 @@ impl Controller {
     }
 
     fn on_control(&mut self, mpv: &libmpv2::Mpv, control: Control) {
+        // OSC input works even while a file is still loading.
+        match control {
+            Control::MouseMove { x, y } => {
+                let _ = mpv.command("mouse", &[&format_coord(x), &format_coord(y)]);
+                return;
+            }
+            Control::MouseButton {
+                x,
+                y,
+                button,
+                pressed,
+            } => {
+                let _ = mpv.command("mouse", &[&format_coord(x), &format_coord(y)]);
+                let name = format!("MOUSE_BTN{button}");
+                let _ = mpv.command(if pressed { "keydown" } else { "keyup" }, &[&name]);
+                return;
+            }
+            Control::Wheel { lines } => {
+                let key = if lines > 0 { "WHEEL_UP" } else { "WHEEL_DOWN" };
+                for _ in 0..lines.abs() {
+                    let _ = mpv.command("keypress", &[key]);
+                }
+                return;
+            }
+            _ => {}
+        }
         if let Control::SubtitleInset(fraction) = control {
             // sub-margin-y is in pixels of a 720-line reference frame.
-            let margin = (fraction.clamp(0.0, 0.5) * 720.0).round().max(DEFAULT_SUB_MARGIN);
+            let margin = (fraction.clamp(0.0, 0.5) * 720.0)
+                .round()
+                .max(DEFAULT_SUB_MARGIN);
             if let Err(error) = mpv.set_property("sub-margin-y", margin as i64) {
                 eprintln!("player subtitle margin failed: {error}");
             }
@@ -515,12 +587,18 @@ impl Controller {
             }
             _ if !loaded => Ok(()),
             Control::TogglePause => mpv.command("cycle", &["pause"]),
-            Control::SeekBy(seconds) => mpv.command("seek", &[&seconds.to_string(), "relative+exact"]),
+            Control::SeekBy(seconds) => {
+                mpv.command("seek", &[&seconds.to_string(), "relative+exact"])
+            }
             Control::SeekTo { seconds, exact } => mpv.command(
                 "seek",
                 &[
                     &seconds.max(0.0).to_string(),
-                    if exact { "absolute+exact" } else { "absolute+keyframes" },
+                    if exact {
+                        "absolute+exact"
+                    } else {
+                        "absolute+keyframes"
+                    },
                 ],
             ),
             Control::SetVolume(volume) => mpv
@@ -531,7 +609,10 @@ impl Controller {
             Control::SelectSubtitle(Some(id)) => mpv.set_property("sid", id),
             Control::SelectSubtitle(None) => mpv.set_property("sid", "no"),
             Control::SetSpeed(speed) => mpv.set_property("speed", speed.clamp(0.25, 4.0)),
-            Control::SubtitleInset(_) => Ok(()),
+            Control::SubtitleInset(_)
+            | Control::MouseMove { .. }
+            | Control::MouseButton { .. }
+            | Control::Wheel { .. } => Ok(()),
         };
         if let Err(error) = result {
             eprintln!("player control failed: {error}");
@@ -542,18 +623,15 @@ impl Controller {
     fn set_fullscreen(&mut self, mpv: &libmpv2::Mpv, fullscreen: bool) {
         self.fullscreen = fullscreen;
         let _ = mpv.set_property("fullscreen", fullscreen);
-        if let Err(error) = self.window.set_fullscreen(fullscreen) {
-            eprintln!("player fullscreen failed: {error}");
-        }
+        self.host.set_fullscreen(fullscreen);
     }
 
-    /// The window was resized, possibly by the green button or Esc.
+    /// The window was resized, possibly by the macOS fullscreen button.
     fn sync_window_fullscreen(&mut self, mpv: &libmpv2::Mpv) {
-        if let Ok(fullscreen) = self.window.is_fullscreen() {
-            if fullscreen != self.fullscreen {
-                self.fullscreen = fullscreen;
-                let _ = mpv.set_property("fullscreen", fullscreen);
-            }
+        let fullscreen = self.host.is_fullscreen();
+        if fullscreen != self.fullscreen {
+            self.fullscreen = fullscreen;
+            let _ = mpv.set_property("fullscreen", fullscreen);
         }
     }
 
@@ -566,6 +644,9 @@ impl Controller {
     }
 
     fn push(&mut self, mpv: &libmpv2::Mpv) {
+        if !USE_NATIVE_CHROME {
+            return;
+        }
         if self
             .notice
             .as_ref()
@@ -589,7 +670,11 @@ impl Controller {
             } else {
                 self.position_ticks as f64 / TICKS_PER_SECOND
             },
-            duration: if loaded { number("duration", 0.0).max(0.0) } else { 0.0 },
+            duration: if loaded {
+                number("duration", 0.0).max(0.0)
+            } else {
+                0.0
+            },
             paused: !loaded || flag("pause"),
             buffering: loaded && flag("paused-for-cache"),
             volume: number("volume", 100.0),
@@ -598,13 +683,21 @@ impl Controller {
             fullscreen: self.fullscreen,
             tracks: if loaded { read_tracks(mpv) } else { Vec::new() },
         };
-        macos_view::update(&self.app, &self.id, state);
+        #[cfg(target_os = "macos")]
+        chrome::update(&self.view_id, state);
+        #[cfg(not(target_os = "macos"))]
+        let _ = state;
     }
 
     fn finish(mut self, ended: bool) {
         if let Some(active) = self.active.take() {
             let media_source_id = active.media_source(&self);
-            self.end_source(active.ticket, active.started, &media_source_id, active.play_session_id);
+            self.end_source(
+                active.ticket,
+                active.started,
+                &media_source_id,
+                active.play_session_id,
+            );
         }
         if ended {
             if let Some(user_id) = self.media.as_ref().and_then(|media| media.user_id.clone()) {
@@ -674,6 +767,13 @@ impl Controller {
     }
 }
 
+fn format_coord(value: f64) -> String {
+    if !value.is_finite() {
+        return "0".to_string();
+    }
+    format!("{}", value.round() as i64)
+}
+
 impl ActiveSource {
     fn media_source(&self, controller: &Controller) -> String {
         controller
@@ -703,7 +803,9 @@ fn read_tracks(mpv: &libmpv2::Mpv) -> Vec<Track> {
             let language = text("lang");
             let codec = text("codec").map(|codec| codec.to_uppercase());
             let mut label = match (title, language) {
-                (Some(title), Some(language)) if !title.contains(&language) => format!("{title}（{language}）"),
+                (Some(title), Some(language)) if !title.contains(&language) => {
+                    format!("{title}（{language}）")
+                }
                 (Some(title), _) => title,
                 (None, Some(language)) => language,
                 (None, None) => format!("轨道 {id}"),
@@ -715,7 +817,9 @@ fn read_tracks(mpv: &libmpv2::Mpv) -> Vec<Track> {
                 id,
                 kind,
                 label,
-                selected: mpv.get_property::<bool>(&property("selected")).unwrap_or(false),
+                selected: mpv
+                    .get_property::<bool>(&property("selected"))
+                    .unwrap_or(false),
             })
         })
         .collect()
