@@ -11,6 +11,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const adminDir = resolve(process.env.TJXY_ADMIN_DIR ?? join(repoRoot, '..', 'TJXY', 'admin'));
@@ -33,18 +34,36 @@ function viteBuild(shell, outDir) {
   );
 }
 
-function inlineAsset(html, assetPath) {
+function inlineAsset(assetPath) {
   const source = readFileSync(assetPath, 'utf8');
-  return source.replace(/<\/script/gi, '<\\/script');
+  const ts = createRequire(join(adminDir, 'package.json'))('typescript');
+  const result = ts.transpileModule(source, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
+    transformers: { before: [(context) => {
+      const visit = (node) => {
+        if (ts.isMetaProperty(node) && node.keywordToken === ts.SyntaxKind.ImportKeyword) {
+          return ts.factory.createObjectLiteralExpression([
+            ts.factory.createPropertyAssignment('url', ts.factory.createPropertyAccessExpression(
+              ts.factory.createPropertyAccessExpression(ts.factory.createIdentifier('window'), 'location'), 'href')),
+          ]);
+        }
+        return ts.visitEachChild(node, visit, context);
+      };
+      return (root) => ts.visitNode(root, visit);
+    }] },
+  });
+  return `(function(exports) {\n${result.outputText}\n})({});`.replace(/<\/script/gi, '<\\/script');
 }
 
 function buildSingleFile(distDir) {
   const htmlPath = join(distDir, 'index.html');
   let html = readFileSync(htmlPath, 'utf8');
+  const scripts = [];
 
   html = html.replace(/<script\b[^>]*\bsrc="(\.\/[^"]+\.js)"[^>]*><\/script>/g, (match, src) => {
-    const content = inlineAsset(html, join(distDir, src.replace('./', '')));
-    return `<script type="module">${content}</script>`;
+    const content = inlineAsset(join(distDir, src.replace('./', '')));
+    scripts.push(`<script>${content}</script>`);
+    return '';
   });
   html = html.replace(/<link\b[^>]*\bhref="(\.\/[^"]+\.css)"[^>]*>/g, (match, href) => {
     const content = readFileSync(join(distDir, href.replace('./', '')), 'utf8');
@@ -52,7 +71,7 @@ function buildSingleFile(distDir) {
   });
   html = html.replace(/<link\b[^>]*\brel="modulepreload"[^>]*>/g, '');
   html = html.replace(/<link\b[^>]*\bhref="\.\/brand\/[^"]+"[^>]*>/g, '');
-  return html;
+  return html.replace('</body>', () => `${scripts.join('\n')}</body>`);
 }
 
 viteBuild('desktop', desktopOut);

@@ -1,13 +1,14 @@
 import { Asset } from 'expo-asset';
 import { fetch as expoFetch } from 'expo/fetch';
 import * as FileSystem from 'expo-file-system/legacy';
+import * as SecureStore from 'expo-secure-store';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { Alert, Spinner, Typography } from 'heroui-native';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert as NativeAlert, BackHandler, Linking, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import WebView, { type WebViewMessageEvent } from 'react-native-webview';
-import { useBridgeSession } from '../src/bridgeSession';
+import { BRIDGE_SESSION_KEY, useBridgeSession, type BridgeSession } from '../src/bridgeSession';
 import { parseNativePlayRequest, postToWeb, registerWebView, setPendingPlayRequest } from '../src/playRequest';
 import { BRIDGE_SCRIPT } from '../src/webBridgeScript';
 import { TvButton as Button } from '../src/ui/TvButton';
@@ -77,9 +78,8 @@ export default function WebHomeScreen() {
   const webRef = useRef<WebView>(null);
   const fetchControllers = useRef(new Map<string, AbortController>());
   const lastPlayAt = useRef(0);
-  const [html, setHtml] = useState<string>();
-  const pageScript = useRef('');
-  const scriptLoaded = useRef(false);
+  const [htmlUri, setHtmlUri] = useState<string>();
+  const [bootstrapScript, setBootstrapScript] = useState('');
   const [loadError, setLoadError] = useState(false);
   const [webError, setWebError] = useState(false);
   const [attempt, setAttempt] = useState(0);
@@ -105,8 +105,7 @@ export default function WebHomeScreen() {
     canGoBack.current = false;
     setLoadError(false);
     setWebError(false);
-    setHtml(undefined);
-    scriptLoaded.current = false;
+    setHtmlUri(undefined);
     setAttempt((value) => value + 1);
   }
 
@@ -114,47 +113,29 @@ export default function WebHomeScreen() {
     let active = true;
     void (async () => {
       try {
+        const saved = await SecureStore.getItemAsync(BRIDGE_SESSION_KEY);
+        if (saved) {
+          try {
+            const session = JSON.parse(saved) as BridgeSession;
+            const script = `(() => { const session = ${JSON.stringify(session)}; if (session.serverOrigin) localStorage.setItem('tjxy.api.baseUrl', session.serverOrigin); if (session.deviceId) localStorage.setItem('tjxy.web.deviceId', session.deviceId); if (session.rememberLogin && session.accessToken) { sessionStorage.setItem('tjxy.web.token', session.accessToken); localStorage.setItem('tjxy.web.rememberCredentials', '1'); } })();`;
+            if (active) setBootstrapScript(script);
+          } catch {
+            await SecureStore.deleteItemAsync(BRIDGE_SESSION_KEY);
+          }
+        }
         const asset = Asset.fromModule(webBundleAsset);
         await asset.downloadAsync();
         const uri = asset.localUri ?? asset.uri;
-        const content = await FileSystem.readAsStringAsync(uri);
-        const script = content.match(/<script type="module">([\s\S]*?)<\/script>/);
-        if (!script) throw new Error('Application script is missing.');
-        if (active) {
-          pageScript.current = script[1]!;
-          setHtml(content.replace(script[0], ''));
-        }
-      } catch {
+        const cachedUri = `${FileSystem.cacheDirectory}tjxy-app.html`;
+        await FileSystem.copyAsync({ from: uri, to: cachedUri });
+        if (active) setHtmlUri(cachedUri);
+      } catch (error) {
+        console.warn('TJXY bundle loading:', error);
         if (active) setLoadError(true);
       }
     })();
     return () => { active = false; };
   }, [attempt]);
-
-  const loadPageScript = useCallback(() => {
-    if (scriptLoaded.current || !webRef.current) return;
-    scriptLoaded.current = true;
-    webRef.current.injectJavaScript('window.__tjxyScriptParts = []; true;');
-    const script = pageScript.current;
-    for (let offset = 0; offset < script.length; offset += CHUNK_BYTES) {
-      webRef.current.injectJavaScript(`window.__tjxyScriptParts.push(${JSON.stringify(script.slice(offset, offset + CHUNK_BYTES))}); true;`);
-    }
-    webRef.current.injectJavaScript(`try {
-      var source = new Blob([window.__tjxyScriptParts.join('')], { type: 'text/javascript' });
-      var url = URL.createObjectURL(source);
-      var script = document.createElement('script');
-      script.type = 'module';
-      script.src = url;
-      script.onload = function () { URL.revokeObjectURL(url); };
-      script.onerror = function () {
-        window.ReactNativeWebView.postMessage(JSON.stringify({ kind: 'tjxy-web-error', message: 'Unable to execute application module.' }));
-      };
-      document.head.appendChild(script);
-    } catch (error) {
-      window.ReactNativeWebView.postMessage(JSON.stringify({ kind: 'tjxy-web-error', message: String(error) }));
-    }
-    delete window.__tjxyScriptParts; true;`);
-  }, []);
 
   useEffect(() => {
     return () => {
@@ -265,7 +246,7 @@ export default function WebHomeScreen() {
       </SafeAreaView>
     );
   }
-  if (!html) {
+  if (!htmlUri) {
     return (
       <View className="flex-1 items-center justify-center gap-3 bg-background" style={{ flex: 1 }}>
         <Spinner />
@@ -277,22 +258,25 @@ export default function WebHomeScreen() {
   return (
     <SafeAreaView className="flex-1 bg-background" edges={['top', 'bottom', 'left', 'right']} style={{ flex: 1 }}>
       <WebView
+        webviewDebuggingEnabled
+        allowFileAccess
+        allowingReadAccessToURL={FileSystem.cacheDirectory ?? undefined}
         allowsFullscreenVideo={false}
         allowsInlineMediaPlayback
         domStorageEnabled
-        injectedJavaScriptBeforeContentLoaded={BRIDGE_SCRIPT}
+        injectedJavaScriptBeforeContentLoaded={bootstrapScript + BRIDGE_SCRIPT}
         injectedJavaScript={BRIDGE_SCRIPT}
         onMessage={onMessage}
         originWhitelist={['*']}
         ref={attachWebView}
         onNavigationStateChange={(state) => { canGoBack.current = state.canGoBack; }}
-        onError={() => { setWebError(true); }}
+        onError={(event) => { console.warn('TJXY load error:', event.nativeEvent.description); setWebError(true); }}
         onRenderProcessGone={() => { setWebError(true); }}
         onContentProcessDidTerminate={() => { setWebError(true); }}
-        onLoadEnd={loadPageScript}
-        source={{ html, baseUrl: 'http://tjxy.app/app/' }}
+        source={{ uri: htmlUri }}
         style={{ flex: 1, backgroundColor: 'transparent' }}
         onShouldStartLoadWithRequest={(request) => {
+          if (request.url.startsWith(htmlUri)) return true;
           if (request.url.startsWith('http://tjxy.app/') || request.url === 'about:blank') return true;
           void Linking.openURL(request.url);
           return false;

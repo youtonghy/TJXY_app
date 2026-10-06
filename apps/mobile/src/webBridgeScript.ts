@@ -11,6 +11,9 @@ export const BRIDGE_SCRIPT = String.raw`
 (function () {
   if (window.__tjxyBridgeInstalled) return;
   window.__tjxyBridgeInstalled = true;
+  if (window.location.protocol === 'file:' && !window.location.hash) {
+    window.location.hash = '/app/';
+  }
 
   var pending = new Map();
   var sequence = 0;
@@ -21,7 +24,7 @@ export const BRIDGE_SCRIPT = String.raw`
 
   window.addEventListener('error', function (event) {
     if (!event.error) return;
-    emit({ kind: 'tjxy-web-error', message: event.message || 'Page script failed.' });
+    emit({ kind: 'tjxy-web-error', message: String(event.error && (event.error.stack || event.error.message) || event.message || 'Page script failed.') });
   });
 
   window.addEventListener('load', function () {
@@ -163,6 +166,9 @@ export const BRIDGE_SCRIPT = String.raw`
     if (target === undefined || target === null) return null;
     var url;
     try { url = new URL(String(target), window.location.href); } catch (error) { return null; }
+    if (url.protocol === 'file:' && url.hash.startsWith('#/')) {
+      url = new URL(url.hash.slice(1), 'http://tjxy.app');
+    }
     var match = PLAY_PATH.exec(url.pathname);
     if (!match) return null;
     var itemId;
@@ -210,7 +216,7 @@ export const BRIDGE_SCRIPT = String.raw`
   if (initialPlay) {
     var itemPath = '/app/items/' + encodeURIComponent(initialPlay.itemId)
       + (initialPlay.libraryId ? '?libraryId=' + encodeURIComponent(initialPlay.libraryId) : '');
-    originalReplaceState.call(window.history, window.history.state, '', itemPath);
+    originalReplaceState.call(window.history, window.history.state, '', window.location.protocol === 'file:' ? '#' + itemPath : itemPath);
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', function () { requestNativePlay(initialPlay); }, { once: true });
     } else {
