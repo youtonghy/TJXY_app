@@ -139,7 +139,21 @@ export default function WebHomeScreen() {
     for (let offset = 0; offset < script.length; offset += CHUNK_BYTES) {
       webRef.current.injectJavaScript(`window.__tjxyScriptParts.push(${JSON.stringify(script.slice(offset, offset + CHUNK_BYTES))}); true;`);
     }
-    webRef.current.injectJavaScript('eval(window.__tjxyScriptParts.join("")); delete window.__tjxyScriptParts; true;');
+    webRef.current.injectJavaScript(`try {
+      var source = new Blob([window.__tjxyScriptParts.join('')], { type: 'text/javascript' });
+      var url = URL.createObjectURL(source);
+      var script = document.createElement('script');
+      script.type = 'module';
+      script.src = url;
+      script.onload = function () { URL.revokeObjectURL(url); };
+      script.onerror = function () {
+        window.ReactNativeWebView.postMessage(JSON.stringify({ kind: 'tjxy-web-error', message: 'Unable to execute application module.' }));
+      };
+      document.head.appendChild(script);
+    } catch (error) {
+      window.ReactNativeWebView.postMessage(JSON.stringify({ kind: 'tjxy-web-error', message: String(error) }));
+    }
+    delete window.__tjxyScriptParts; true;`);
   }, []);
 
   useEffect(() => {
