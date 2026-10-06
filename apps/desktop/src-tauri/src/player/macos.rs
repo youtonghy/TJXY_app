@@ -8,9 +8,7 @@ use crate::server::{
 use std::ffi::{c_void, CString};
 use std::num::NonZeroU32;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -112,7 +110,7 @@ pub fn run(context: Context) -> Result<(), String> {
         Ok(())
     })
     .map_err(|error| format!("mpv initialize: {error}"))?;
-    let mut render_context = mpv
+    let render_context = mpv
         .create_render_context(vec![
             RenderParam::ApiType(RenderParamApiType::OpenGl),
             RenderParam::InitParams(OpenGLInitParams {
@@ -121,9 +119,10 @@ pub fn run(context: Context) -> Result<(), String> {
             }),
         ])
         .map_err(|error| format!("mpv render context: {error}"))?;
-    let redraw = Arc::new(AtomicBool::new(true));
-    let redraw_signal = redraw.clone();
-    render_context.set_update_callback(move || redraw_signal.store(true, Ordering::Release));
+    // No render update callback: libmpv2 drops the boxed callback before
+    // mpv_render_context_free, while mpv's vo thread may still invoke it —
+    // a use-after-free that crashed on every racing teardown. update() is
+    // polled on this thread instead.
     let event_client = mpv
         .create_client(Some("tjxy_events"))
         .map_err(|error| format!("mpv event client: {error}"))?;
@@ -137,6 +136,7 @@ pub fn run(context: Context) -> Result<(), String> {
     controller.push(&mpv);
 
     let mut last_poll = Instant::now();
+    let mut force_redraw = true;
     let mut ended = false;
     let mut failure = None;
     'player: loop {
@@ -145,7 +145,7 @@ pub fn run(context: Context) -> Result<(), String> {
             Ok(WorkerCommand::Resize { width, height }) => {
                 render_size = (non_zero(width), non_zero(height));
                 surface.resize(&gl_context, render_size.0, render_size.1);
-                redraw.store(true, Ordering::Release);
+                force_redraw = true;
                 controller.sync_window_fullscreen(&mpv);
             }
             Ok(WorkerCommand::Loaded(result)) => controller.on_loaded(&mpv, result),
@@ -176,22 +176,25 @@ pub fn run(context: Context) -> Result<(), String> {
             }
         }
 
-        if redraw.swap(false, Ordering::AcqRel) {
+        let flags = match render_context.update() {
+            Ok(flags) => flags,
+            Err(error) => {
+                failure = Some(format!("mpv render update: {error}"));
+                break;
+            }
+        };
+        if force_redraw || flags & mpv_render_update::Frame != 0 {
+            force_redraw = false;
             let rendered = (|| {
-                let flags = render_context
-                    .update()
-                    .map_err(|error| format!("mpv render update: {error}"))?;
-                if flags & mpv_render_update::Frame != 0 {
-                    let width = render_size.0.get() as i32;
-                    let height = render_size.1.get() as i32;
-                    render_context
-                        .render::<Display>(0, width, height, true)
-                        .map_err(|error| format!("mpv render frame: {error}"))?;
-                    surface
-                        .swap_buffers(&gl_context)
-                        .map_err(|error| format!("OpenGL swap buffers: {error}"))?;
-                    render_context.report_swap();
-                }
+                let width = render_size.0.get() as i32;
+                let height = render_size.1.get() as i32;
+                render_context
+                    .render::<Display>(0, width, height, true)
+                    .map_err(|error| format!("mpv render frame: {error}"))?;
+                surface
+                    .swap_buffers(&gl_context)
+                    .map_err(|error| format!("OpenGL swap buffers: {error}"))?;
+                render_context.report_swap();
                 Ok::<(), String>(())
             })();
             if let Err(error) = rendered {
