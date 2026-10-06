@@ -149,22 +149,15 @@ export default function WebHomeScreen() {
         kind: 'tjxy-fetch', id: message.id, phase: 'headers',
         status: response.status, statusText: response.statusText, headers,
       });
-      const body = response.body;
-      if (!body) {
-        postToWeb({ kind: 'tjxy-fetch', id: message.id, phase: 'end' });
-        return;
-      }
-      const reader = body.getReader();
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (!value) continue;
-        for (let offset = 0; offset < value.length; offset += CHUNK_BYTES) {
-          postToWeb({
-            kind: 'tjxy-fetch', id: message.id, phase: 'chunk',
-            data: toBase64(value.subarray(offset, offset + CHUNK_BYTES)),
-          });
-        }
+      // expo/fetch may expose no ReadableStream on Android even though the
+      // response has a binary body. arrayBuffer() keeps Blob/image requests
+      // working across Android and desktop while preserving chunked messages.
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      for (let offset = 0; offset < bytes.length; offset += CHUNK_BYTES) {
+        postToWeb({
+          kind: 'tjxy-fetch', id: message.id, phase: 'chunk',
+          data: toBase64(bytes.subarray(offset, offset + CHUNK_BYTES)),
+        });
       }
       postToWeb({ kind: 'tjxy-fetch', id: message.id, phase: 'end' });
     } catch (error) {
