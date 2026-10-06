@@ -19,6 +19,20 @@ export const BRIDGE_SCRIPT = String.raw`
     window.ReactNativeWebView.postMessage(JSON.stringify(message));
   }
 
+  window.addEventListener('error', function (event) {
+    if (!event.error) return;
+    emit({ kind: 'tjxy-web-error', message: event.message || 'Page script failed.' });
+  });
+
+  window.addEventListener('load', function () {
+    window.setTimeout(function () {
+      var root = document.getElementById('root');
+      if (!root || !root.hasChildNodes()) {
+        emit({ kind: 'tjxy-web-error', message: 'Application did not render.' });
+      }
+    }, 15000);
+  }, { once: true });
+
   function onMessage(event) {
     var data = event && event.data;
     if (typeof data !== 'string') return;

@@ -177,6 +177,11 @@ export default function WebHomeScreen() {
     } catch {
       return;
     }
+    if (message.kind === 'tjxy-web-error') {
+      console.warn('TJXY WebView:', message.message);
+      setWebError(true);
+      return;
+    }
     if (message.kind === 'tjxy-fetch') {
       void handleFetch(message as unknown as FetchMessage);
       return;
@@ -251,7 +256,7 @@ export default function WebHomeScreen() {
         onError={() => { setWebError(true); }}
         onRenderProcessGone={() => { setWebError(true); }}
         onContentProcessDidTerminate={() => { setWebError(true); }}
-        source={{ html, baseUrl: 'http://tjxy.app/' }}
+        source={{ html, baseUrl: 'http://tjxy.app/app/' }}
         style={{ flex: 1, backgroundColor: 'transparent' }}
         onShouldStartLoadWithRequest={(request) => {
           if (request.url.startsWith('http://tjxy.app/') || request.url === 'about:blank') return true;
