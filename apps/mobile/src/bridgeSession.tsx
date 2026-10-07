@@ -47,6 +47,12 @@ export function BridgeSessionProvider({ children }: { children: ReactNode }) {
     client: session ? buildClient(session) : null,
     setSession: (next) => {
       setSession(next);
+      if (!next.accessToken) {
+        void SecureStore.deleteItemAsync(BRIDGE_SESSION_KEY).catch(() => {
+          console.warn('Could not clear the TJXY session.');
+        });
+        return;
+      }
       const saved = { ...next, accessToken: next.rememberLogin ? next.accessToken : null };
       void SecureStore.setItemAsync(BRIDGE_SESSION_KEY, JSON.stringify(saved)).catch(() => {
         console.warn('Could not persist the TJXY session.');

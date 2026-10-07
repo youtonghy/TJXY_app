@@ -33,6 +33,22 @@ export function prepareFrontend() {
   patchSource(join(staged, 'src', 'client', 'api', 'apiBase.ts'), [
     ["return import.meta.env.VITE_TJXY_SHELL === 'desktop';", "return import.meta.env.VITE_TJXY_SHELL === 'desktop' || import.meta.env.VITE_TJXY_SHELL === 'mobile';"],
   ]);
+  const authDir = join(staged, 'src', 'client', 'auth');
+  for (const name of ['savedCredentials.ts', 'shellSession.ts']) {
+    cpSync(join(repoRoot, 'scripts', 'frontend', name), join(authDir, name));
+  }
+  patchSource(join(staged, 'src', 'auth', 'session.ts'), [
+    ["const TOKEN_KEY", "import { publishShellSession } from '../client/auth/shellSession';\n\nconst TOKEN_KEY"],
+    ['export function clearSession(): void {\n  sessionStorage.removeItem(TOKEN_KEY);', 'export function clearSession(): void {\n  sessionStorage.removeItem(TOKEN_KEY);\n  publishShellSession();'],
+  ]);
+  patchSource(join(authDir, 'ClientAuthContext.tsx'), [
+    ["import { authenticateWithPasskey }", "import { rememberSignedInUser } from './shellSession';\nimport { authenticateWithPasskey }"],
+    ['rememberMe = false', 'rememberMe = true'],
+    ['        setUser(current);', '        rememberSignedInUser(current, rememberMe);\n        setUser(current);'],
+    ['      setUser(current);\n    },', '      rememberSignedInUser(current);\n      setUser(current);\n    },'],
+    ['      setUser(authentication.User);', '      rememberSignedInUser(authentication.User);\n      setUser(authentication.User);'],
+    [".catch(() => { clearClientToken(); setUser(null); })", ".catch((error: unknown) => { if (error instanceof ClientApiError && error.kind === 'authentication') clearClientToken(); setUser(null); })"],
+  ]);
   return staged;
 }
 
