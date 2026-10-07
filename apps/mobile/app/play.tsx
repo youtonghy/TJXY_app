@@ -189,6 +189,9 @@ export default function PlayScreen() {
       await openSource(candidates, 0, item.UserData?.PlaybackPositionTicks ?? 0, info.PlaySessionId || undefined);
     } catch (error) {
       if (generation !== generationRef.current) return;
+      console.warn('TJXY playback setup failed', error instanceof ClientApiError
+        ? { kind: error.kind, status: error.status }
+        : { name: error instanceof Error ? error.name : typeof error, message: error instanceof Error ? error.message : String(error) });
       setFailure(errorMessage(error, '加载播放信息失败'));
       setPreparing(false);
     }
