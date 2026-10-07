@@ -5,7 +5,7 @@ import * as SecureStore from 'expo-secure-store';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { Alert, Spinner, Typography } from 'heroui-native';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert as NativeAlert, BackHandler, Linking, View } from 'react-native';
+import { Alert as NativeAlert, BackHandler, Linking, Platform, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import WebView, { type WebViewMessageEvent } from 'react-native-webview';
 import { BRIDGE_SESSION_KEY, useBridgeSession, type BridgeSession } from '../src/bridgeSession';
@@ -93,8 +93,16 @@ export default function WebHomeScreen() {
 
   useFocusEffect(useCallback(() => {
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (!canGoBack.current || !webRef.current) return false;
-      webRef.current.goBack();
+      if (!webRef.current) return false;
+      if (canGoBack.current) {
+        webRef.current.goBack();
+        return true;
+      }
+      if (!Platform.isTV) return false;
+      // HashRouter navigation in a file WebView does not always update
+      // WebView.canGoBack. Ask the page to go back before allowing Android to
+      // close the activity.
+      webRef.current.injectJavaScript(`(function(){if(location.hash && location.hash !== '#/app/' && history.length > 1){history.back();return;} window.ReactNativeWebView.postMessage(JSON.stringify({kind:'tjxy-tv-back'}));})();true;`);
       return true;
     });
     return () => subscription.remove();
@@ -197,6 +205,10 @@ export default function WebHomeScreen() {
     } catch {
       return;
     }
+    if (message.kind === 'tjxy-tv-back') {
+      BackHandler.exitApp();
+      return;
+    }
     if (message.kind === 'tjxy-web-error') {
       console.warn('TJXY WebView:', message.message);
       setWebError(true);
@@ -270,8 +282,8 @@ export default function WebHomeScreen() {
         allowsFullscreenVideo={false}
         allowsInlineMediaPlayback
         domStorageEnabled
-        injectedJavaScriptBeforeContentLoaded={bootstrapScript + BRIDGE_SCRIPT}
-        injectedJavaScript={BRIDGE_SCRIPT}
+        injectedJavaScriptBeforeContentLoaded={`window.__TJXY_TV_MODE__=${Platform.isTV ? 'true' : 'false'};` + bootstrapScript + BRIDGE_SCRIPT}
+        injectedJavaScript={`window.__TJXY_TV_MODE__=${Platform.isTV ? 'true' : 'false'};` + BRIDGE_SCRIPT}
         onMessage={onMessage}
         originWhitelist={['*']}
         ref={attachWebView}

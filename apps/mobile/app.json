@@ -7,6 +7,7 @@
     "orientation": "default",
     "userInterfaceStyle": "automatic",
     "plugins": [
+      "./plugins/with-android-tv.cjs",
       "./plugins/with-ios-scenes.cjs",
       "expo-router",
       "expo-secure-store",

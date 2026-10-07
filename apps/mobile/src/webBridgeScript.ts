@@ -9,6 +9,89 @@
 //   to native as tjxy-native-play and the native player does the rest
 export const BRIDGE_SCRIPT = String.raw`
 (function () {
+  // Android TV uses a 960x540 WebView viewport on the 4K emulator. Keep the
+  // existing responsive web client usable with a remote without changing its
+  // phone/tablet layout.
+  if (window.__TJXY_TV_MODE__ && !window.__tjxyTvInstalled) {
+  window.__tjxyTvInstalled = true;
+  var tvStyle = document.createElement('style');
+  tvStyle.textContent = [
+    ':root[data-tjxy-tv="true"] * { scroll-margin-block: 12vh; }',
+    ':root[data-tjxy-tv="true"] :focus { outline: 3px solid #62a8ff !important; outline-offset: 4px !important; box-shadow: 0 0 0 7px rgba(98,168,255,.28) !important; }',
+    ':root[data-tjxy-tv="true"] #root > div:has(> main > section input[name="server"]) { padding: 20px !important; }',
+    ':root[data-tjxy-tv="true"] main:has(> section input[name="server"]) { max-width: 900px !important; min-height: calc(100vh - 40px) !important; align-items: flex-start !important; }',
+    ':root[data-tjxy-tv="true"] section:has(input[name="server"]) { padding: 24px !important; display: grid; grid-template-columns: 1fr 1fr; column-gap: 40px; }',
+    ':root[data-tjxy-tv="true"] section:has(input[name="server"]) > div.mb-8 { margin-bottom: 8px !important; grid-column: 1; }',
+    ':root[data-tjxy-tv="true"] section:has(input[name="server"]) > h1, :root[data-tjxy-tv="true"] section:has(input[name="server"]) > p { grid-column: 1; }',
+    ':root[data-tjxy-tv="true"] section:has(input[name="server"]) > .mt-5 { grid-column: 1; margin-top: 14px !important; }',
+    ':root[data-tjxy-tv="true"] section:has(input[name="server"]) > .tabs { grid-column: 2; grid-row: 1 / span 6; margin-top: 48px !important; }',
+    ':root[data-tjxy-tv="true"] input:not([type="checkbox"]), :root[data-tjxy-tv="true"] button, :root[data-tjxy-tv="true"] [role="tab"], :root[data-tjxy-tv="true"] [role="option"] { min-height: 44px; }'
+  ].join('\n');
+  (document.head || document.documentElement).appendChild(tvStyle);
+  if (window.__TJXY_TV_MODE__) document.documentElement.dataset.tjxyTv = 'true';
+  function focusTvStart() {
+    if (!window.__TJXY_TV_MODE__ || document.activeElement !== document.body) return;
+    var first = document.querySelector('input[name="server"], button[type="submit"], input, button');
+    if (first && typeof first.focus === 'function') first.focus({ preventScroll: true });
+  }
+  document.addEventListener('DOMContentLoaded', function () { window.setTimeout(focusTvStart, 250); }, { once: true });
+  window.setTimeout(function () {
+    if (window.__TJXY_TV_MODE__) document.documentElement.dataset.tjxyTv = 'true';
+  }, 0);
+  var focusObserver = new MutationObserver(function () {
+    if (document.querySelector('input[name="server"], a[href]')) {
+      focusTvStart();
+      focusObserver.disconnect();
+    }
+  });
+  focusObserver.observe(document.documentElement, { childList: true, subtree: true });
+  var tvNavigationStarted = false;
+  document.addEventListener('keydown', function (event) {
+    if (!/^Arrow(Up|Down|Left|Right)$/.test(event.key)) return;
+    if (!tvNavigationStarted && document.querySelector('input[name="server"]')) {
+      tvNavigationStarted = true;
+      document.querySelector('input[name="server"]').focus({ preventScroll: true });
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    var current = document.activeElement;
+    if (!current || current === document.body) { focusTvStart(); event.preventDefault(); return; }
+    // React Aria owns arrows inside menus and roving-tabindex controls.
+    if (current && current.closest('[role="listbox"], [role="menu"], [role="tablist"]')) return;
+    var candidates = Array.from(document.querySelectorAll('button:not(:disabled), a[href], input:not(:disabled), [tabindex="0"]')).filter(function (element) {
+      var rect = element.getBoundingClientRect();
+      return rect.width > 8 && rect.height > 8 && !element.closest('[aria-hidden="true"], [inert]') && getComputedStyle(element).visibility !== 'hidden';
+    });
+    var origin = current && current !== document.body ? current.getBoundingClientRect() : null;
+    if (!origin) { focusTvStart(); event.preventDefault(); return; }
+    var horizontal = /Arrow(Left|Right)/.test(event.key);
+    var sign = /Arrow(Right|Down)/.test(event.key) ? 1 : -1;
+    var best = null;
+    var bestScore = Infinity;
+    candidates.forEach(function (element) {
+      if (element === current) return;
+      var rect = element.getBoundingClientRect();
+      var dx = (rect.left + rect.right - origin.left - origin.right) / 2;
+      var dy = (rect.top + rect.bottom - origin.top - origin.bottom) / 2;
+      var forward = (horizontal ? dx : dy) * sign;
+      if (forward < 4) return;
+      var cross = Math.abs(horizontal ? dy : dx);
+      var score = forward + cross * 3;
+      if (score < bestScore) { best = element; bestScore = score; }
+    });
+    if (best) {
+      event.preventDefault();
+      event.stopPropagation();
+      best.focus();
+    }
+  }, true);
+  document.addEventListener('focusin', function (event) {
+    if (window.__TJXY_TV_MODE__ && event.target instanceof HTMLElement) {
+      event.target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+  });
+  }
   if (window.__tjxyBridgeInstalled) return;
   window.__tjxyBridgeInstalled = true;
   if (window.location.protocol === 'file:' && !window.location.hash) {
