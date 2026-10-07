@@ -14,6 +14,7 @@ const { spawn } = require('node:child_process');
 const { once } = require('node:events');
 const { existsSync, readFileSync, statSync } = require('node:fs');
 const { dirname, extname, isAbsolute, join, relative, resolve } = require('node:path');
+const { playerBinaryPath: findPlayerBinary } = require('./player-path.cjs');
 
 const APP_SCHEME = 'tjxy-app';
 const APP_PARTITION = 'persist:tjxy';
@@ -217,20 +218,14 @@ function installFetchBridge(ses, webContents) {
 let playerChild = null;
 
 function playerBinaryPath() {
-  if (process.env.TJXY_PLAYER_BIN) {
-    const candidate = resolve(process.env.TJXY_PLAYER_BIN);
-    return existsSync(candidate) ? candidate : null;
-  }
-  const name = process.platform === 'win32' ? 'tjxy-player.exe' : 'tjxy-player';
-  const candidates = app.isPackaged
-    ? [join(process.resourcesPath, 'player', name)]
-    : [
-        // The Cargo workspace root is apps/desktop, so `cargo build` emits
-        // into target/ next to electron/, not inside the player crate.
-        join(DESKTOP_DIR, 'target', 'release', name),
-        join(DESKTOP_DIR, 'target', 'debug', name),
-      ];
-  return candidates.find((candidate) => existsSync(candidate)) ?? null;
+  return findPlayerBinary({
+    explicitPath: process.env.TJXY_PLAYER_BIN ? resolve(process.env.TJXY_PLAYER_BIN) : undefined,
+    packaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    desktopDir: DESKTOP_DIR,
+    platform: process.platform,
+    arch: process.arch,
+  });
 }
 
 /** Directory holding the bundled libmpv runtime for the current platform. */
