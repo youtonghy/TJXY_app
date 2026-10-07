@@ -12,7 +12,7 @@ export const BRIDGE_SCRIPT = String.raw`
   // Android TV uses a 960x540 WebView viewport on the 4K emulator. Keep the
   // existing responsive web client usable with a remote without changing its
   // phone/tablet layout.
-  if (window.__TJXY_TV_MODE__ && !window.__tjxyTvInstalled) {
+  if (window.__TJXY_TV_MODE__ && document.readyState !== 'loading' && !window.__tjxyTvInstalled) {
   window.__tjxyTvInstalled = true;
   var tvStyle = document.createElement('style');
   tvStyle.textContent = [
@@ -30,11 +30,14 @@ export const BRIDGE_SCRIPT = String.raw`
   (document.head || document.documentElement).appendChild(tvStyle);
   if (window.__TJXY_TV_MODE__) document.documentElement.dataset.tjxyTv = 'true';
   function focusTvStart() {
+    if (!tvStyle.isConnected) (document.head || document.documentElement).appendChild(tvStyle);
+    if (window.__TJXY_TV_MODE__) document.documentElement.dataset.tjxyTv = 'true';
     if (!window.__TJXY_TV_MODE__ || document.activeElement !== document.body) return;
     var first = document.querySelector('input[name="server"], button[type="submit"], input, button');
     if (first && typeof first.focus === 'function') first.focus({ preventScroll: true });
   }
   document.addEventListener('DOMContentLoaded', function () { window.setTimeout(focusTvStart, 250); }, { once: true });
+  window.setTimeout(focusTvStart, 250);
   window.setTimeout(function () {
     if (window.__TJXY_TV_MODE__) document.documentElement.dataset.tjxyTv = 'true';
   }, 0);
@@ -47,6 +50,8 @@ export const BRIDGE_SCRIPT = String.raw`
   focusObserver.observe(document.documentElement, { childList: true, subtree: true });
   var tvNavigationStarted = false;
   document.addEventListener('keydown', function (event) {
+    if (!tvStyle.isConnected) (document.head || document.documentElement).appendChild(tvStyle);
+    document.documentElement.dataset.tjxyTv = 'true';
     if (!/^Arrow(Up|Down|Left|Right)$/.test(event.key)) return;
     if (!tvNavigationStarted && document.querySelector('input[name="server"]')) {
       tvNavigationStarted = true;
@@ -58,7 +63,8 @@ export const BRIDGE_SCRIPT = String.raw`
     var current = document.activeElement;
     if (!current || current === document.body) { focusTvStart(); event.preventDefault(); return; }
     // React Aria owns arrows inside menus and roving-tabindex controls.
-    if (current && current.closest('[role="listbox"], [role="menu"], [role="tablist"]')) return;
+    if (current && current.closest('[role="listbox"], [role="menu"]')) return;
+    if (current && current.closest('[role="tablist"]') && /Arrow(Left|Right)/.test(event.key)) return;
     var candidates = Array.from(document.querySelectorAll('button:not(:disabled), a[href], input:not(:disabled), [tabindex="0"]')).filter(function (element) {
       var rect = element.getBoundingClientRect();
       return rect.width > 8 && rect.height > 8 && !element.closest('[aria-hidden="true"], [inert]') && getComputedStyle(element).visibility !== 'hidden';

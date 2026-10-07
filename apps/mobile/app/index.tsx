@@ -94,16 +94,15 @@ export default function WebHomeScreen() {
   useFocusEffect(useCallback(() => {
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
       if (!webRef.current) return false;
+      if (Platform.isTV) {
+        webRef.current.injectJavaScript(`(function(){var popup=document.querySelector('[role="dialog"],[role="listbox"]');if(popup){document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',keyCode:27,bubbles:true}));return;}var path=location.hash.split('?')[0];if(path && !/^#\\/(app\\/?|login\\/?)$/.test(path)){if(history.length>1)history.back();else location.hash='/app/';return;}window.ReactNativeWebView.postMessage(JSON.stringify({kind:'tjxy-tv-back'}));})();true;`);
+        return true;
+      }
       if (canGoBack.current) {
         webRef.current.goBack();
         return true;
       }
-      if (!Platform.isTV) return false;
-      // HashRouter navigation in a file WebView does not always update
-      // WebView.canGoBack. Ask the page to go back before allowing Android to
-      // close the activity.
-      webRef.current.injectJavaScript(`(function(){if(location.hash && location.hash !== '#/app/' && history.length > 1){history.back();return;} window.ReactNativeWebView.postMessage(JSON.stringify({kind:'tjxy-tv-back'}));})();true;`);
-      return true;
+      return false;
     });
     return () => subscription.remove();
   }, []));
