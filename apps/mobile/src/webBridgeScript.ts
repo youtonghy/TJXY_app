@@ -149,11 +149,16 @@ export const BRIDGE_SCRIPT = String.raw`
   }
   if (window.__tjxyBridgeInstalled) return;
   window.__tjxyBridgeInstalled = true;
+  document.addEventListener('click', function (event) {
+    if (event.target instanceof Element && event.target.closest('[role="tab"][data-key="qr"]')) {
+      window.localStorage.setItem('tjxy.web.rememberCredentials', '1');
+    }
+  }, true);
   var nativePostMessage = window.ReactNativeWebView.postMessage.bind(window.ReactNativeWebView);
   window.ReactNativeWebView.postMessage = function (data) {
     try {
       var outbound = JSON.parse(data);
-      if (outbound.type === 'tjxy-session' && outbound.payload && outbound.payload.accessToken && document.querySelector('[role="tab"][data-key="qr"][aria-selected="true"]')) {
+      if (outbound.type === 'tjxy-session' && outbound.payload && outbound.payload.accessToken && (window.localStorage.getItem('tjxy.web.rememberCredentials') === '1' || document.querySelector('[role="tab"][data-key="qr"][aria-selected="true"]'))) {
         outbound.payload.rememberLogin = true;
         window.localStorage.setItem('tjxy.web.rememberCredentials', '1');
         data = JSON.stringify(outbound);
@@ -274,6 +279,9 @@ export const BRIDGE_SCRIPT = String.raw`
     }
     if (!/^https?:/i.test(url)) return originalFetch(input, init);
     init = init || {};
+    if (/\/Auth\/Qr\/Challenges(?:\?|$)/.test(url) && init.method === 'POST') {
+      window.localStorage.setItem('tjxy.web.rememberCredentials', '1');
+    }
     var headers = {};
     var merged = new Headers(init.headers || (typeof input === 'object' && input && input.headers ? input.headers : undefined) || {});
     merged.forEach(function (value, key) { headers[key] = value; });

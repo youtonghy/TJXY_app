@@ -121,11 +121,13 @@ export default function WebHomeScreen() {
     let active = true;
     void (async () => {
       try {
+        let sessionBootstrap = '';
         const saved = await SecureStore.getItemAsync(BRIDGE_SESSION_KEY).catch(() => null);
         if (saved) {
           try {
             const session = JSON.parse(saved) as BridgeSession;
             const script = `(() => { const session = ${JSON.stringify(session)}; if (session.serverOrigin) localStorage.setItem('tjxy.api.baseUrl', session.serverOrigin); if (session.deviceId) localStorage.setItem('tjxy.web.deviceId', session.deviceId); if (session.rememberLogin && session.accessToken) { sessionStorage.setItem('tjxy.web.token', session.accessToken); localStorage.setItem('tjxy.web.rememberCredentials', '1'); } })();`;
+            sessionBootstrap = script;
             if (active) setBootstrapScript(script);
           } catch {
             await SecureStore.deleteItemAsync(BRIDGE_SESSION_KEY);
@@ -137,7 +139,11 @@ export default function WebHomeScreen() {
         const html = asset.localUri
           ? `${FileSystem.cacheDirectory}tjxy-app.html`
           : uri;
-        if (asset.localUri) await FileSystem.copyAsync({ from: uri, to: html });
+        if (asset.localUri) {
+          const bundledHtml = await FileSystem.readAsStringAsync(uri);
+          const startupScript = `window.__TJXY_TV_MODE__=${Platform.isTV ? 'true' : 'false'};` + sessionBootstrap;
+          await FileSystem.writeAsStringAsync(html, bundledHtml.replace('<head>', `<head><script>${startupScript.replace(/<\/script/gi, '<\\/script')}</script>`));
+        }
         if (active) {
           setHtmlUri(html);
           setReadAccessUri(html.slice(0, html.lastIndexOf('/') + 1));
