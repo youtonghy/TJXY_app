@@ -25,7 +25,17 @@ export const BRIDGE_SCRIPT = String.raw`
     ':root[data-tjxy-tv="true"] section:has(input[name="server"]) > h1, :root[data-tjxy-tv="true"] section:has(input[name="server"]) > p { grid-column: 1; }',
     ':root[data-tjxy-tv="true"] section:has(input[name="server"]) > .mt-5 { grid-column: 1; margin-top: 14px !important; }',
     ':root[data-tjxy-tv="true"] section:has(input[name="server"]) > .tabs { grid-column: 2; grid-row: 1 / span 6; margin-top: 48px !important; }',
-    ':root[data-tjxy-tv="true"] input:not([type="checkbox"]), :root[data-tjxy-tv="true"] button, :root[data-tjxy-tv="true"] [role="tab"], :root[data-tjxy-tv="true"] [role="option"] { min-height: 44px; }'
+    ':root[data-tjxy-tv="true"] input:not([type="checkbox"]), :root[data-tjxy-tv="true"] button, :root[data-tjxy-tv="true"] [role="tab"], :root[data-tjxy-tv="true"] [role="option"] { min-height: 44px; }',
+    ':root[data-tjxy-tv="true"] [data-slot="navbar-menu-toggle"] { display:none !important; }',
+    ':root[data-tjxy-tv="true"] [data-slot="navbar-content"].hidden { display:flex !important; gap:8px; }',
+    ':root[data-tjxy-tv="true"] [data-slot="navbar-header"] { padding-inline:28px !important; gap:12px !important; }',
+    ':root[data-tjxy-tv="true"] [data-slot="dropdown-trigger"] > span:last-child { display:none; }',
+    ':root[data-tjxy-tv="true"] main:not(:has(input[name="server"])) { padding:24px 28px !important; }',
+    ':root[data-tjxy-tv="true"] main > section > h1 { font-size:28px !important; line-height:36px !important; }',
+    ':root[data-tjxy-tv="true"] main .grid:has(> a[href*="/items/"]) { grid-template-columns:repeat(6,minmax(0,1fr)) !important; gap:16px !important; }',
+    ':root[data-tjxy-tv="true"] article > .grid:has(> div > img) { grid-template-columns:180px minmax(0,1fr) !important; gap:24px !important; }',
+    ':root[data-tjxy-tv="true"] article > .grid > .min-w-0 > p.text-muted { max-height:112px; overflow:auto; }',
+    ':root[data-tjxy-tv="true"] * { scroll-margin-top:88px; scroll-margin-bottom:24px; }'
   ].join('\n');
   (document.head || document.documentElement).appendChild(tvStyle);
   if (window.__TJXY_TV_MODE__) document.documentElement.dataset.tjxyTv = 'true';
@@ -48,6 +58,43 @@ export const BRIDGE_SCRIPT = String.raw`
     }
   });
   focusObserver.observe(document.documentElement, { childList: true, subtree: true });
+  var routeFocus = new Map();
+  var focusedRoute = window.location.hash;
+  var routePending = false;
+  function rememberFocus() {
+    var element = document.activeElement;
+    if (element && element !== document.body && !routePending) routeFocus.set(focusedRoute, {
+      element: element, href: element.getAttribute('href'), label: element.getAttribute('aria-label'), text: element.textContent
+    });
+  }
+  function updateTvRoute() {
+    document.querySelectorAll('a[href^="/app"], a[href^="/login"]').forEach(function (link) {
+      link.setAttribute('href', '#' + link.getAttribute('href'));
+    });
+    if (focusedRoute !== window.location.hash) {
+      rememberFocus();
+      focusedRoute = window.location.hash;
+      routePending = true;
+      window.scrollTo(0, 0);
+    }
+    if (!routePending) return;
+    var saved = routeFocus.get(focusedRoute);
+    var target = saved && saved.element.isConnected ? saved.element : null;
+    if (!target && saved) {
+      target = Array.from(document.querySelectorAll('main a[href],main button,main input')).find(function (element) {
+        return saved.href ? element.getAttribute('href') === saved.href : saved.label ? element.getAttribute('aria-label') === saved.label : element.textContent === saved.text;
+      });
+    }
+    if (!target) {
+      var playIcon = document.querySelector('main button svg.lucide-play');
+      target = /\/items\//.test(focusedRoute) ? playIcon && playIcon.closest('button') : document.querySelector('main input:not([type="hidden"]), main a[href*="/items/"], main a[href], main button');
+    }
+    if (target) { routePending = false; target.focus(); }
+  }
+  new MutationObserver(updateTvRoute).observe(document.documentElement, { childList:true, subtree:true });
+  window.addEventListener('popstate', function () { window.setTimeout(updateTvRoute, 0); });
+  window.addEventListener('hashchange', function () { window.setTimeout(updateTvRoute, 0); });
+  updateTvRoute();
   var tvNavigationStarted = false;
   document.addEventListener('keydown', function (event) {
     if (!tvStyle.isConnected) (document.head || document.documentElement).appendChild(tvStyle);
@@ -67,7 +114,7 @@ export const BRIDGE_SCRIPT = String.raw`
     if (current && current.closest('[role="tablist"]') && /Arrow(Left|Right)/.test(event.key)) return;
     var candidates = Array.from(document.querySelectorAll('button:not(:disabled), a[href], input:not(:disabled), [tabindex="0"]')).filter(function (element) {
       var rect = element.getBoundingClientRect();
-      return rect.width > 8 && rect.height > 8 && !element.closest('[aria-hidden="true"], [inert]') && getComputedStyle(element).visibility !== 'hidden';
+      return rect.width > 8 && rect.height > 8 && !element.matches('[aria-disabled="true"], [data-readonly="true"]') && !element.closest('[aria-hidden="true"], [inert], [data-readonly="true"]') && !element.querySelector('button,a[href],input') && getComputedStyle(element).visibility !== 'hidden';
     });
     var origin = current && current !== document.body ? current.getBoundingClientRect() : null;
     if (!origin) { focusTvStart(); event.preventDefault(); return; }
@@ -94,12 +141,26 @@ export const BRIDGE_SCRIPT = String.raw`
   }, true);
   document.addEventListener('focusin', function (event) {
     if (window.__TJXY_TV_MODE__ && event.target instanceof HTMLElement) {
-      event.target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      rememberFocus();
+      if (!event.target.closest('[data-slot="navbar"]')) event.target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      else window.scrollTo(0,0);
     }
   });
   }
   if (window.__tjxyBridgeInstalled) return;
   window.__tjxyBridgeInstalled = true;
+  var nativePostMessage = window.ReactNativeWebView.postMessage.bind(window.ReactNativeWebView);
+  window.ReactNativeWebView.postMessage = function (data) {
+    try {
+      var outbound = JSON.parse(data);
+      if (outbound.type === 'tjxy-session' && outbound.payload && outbound.payload.accessToken && document.querySelector('[role="tab"][data-key="qr"][aria-selected="true"]')) {
+        outbound.payload.rememberLogin = true;
+        window.localStorage.setItem('tjxy.web.rememberCredentials', '1');
+        data = JSON.stringify(outbound);
+      }
+    } catch (error) { /* Non-JSON messages pass through unchanged. */ }
+    nativePostMessage(data);
+  };
   if (window.location.protocol === 'file:' && !window.location.hash) {
     window.location.hash = '/app/';
   }
