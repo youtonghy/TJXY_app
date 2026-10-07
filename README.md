@@ -101,6 +101,13 @@ cd ../../TJXY_app
 pnpm --filter desktop dev
 ```
 
+Desktop development requires Rust and libmpv (Homebrew `mpv` on macOS,
+`libmpv-dev` on Linux, or the staged Windows runtime described in
+`apps/desktop/player/runtime/README.md`). The command builds the native player
+before opening Electron; `TJXY_PLAYER_BIN` can select an existing helper instead.
+It starts its own desktop-mode frontend on the first available port from 5174,
+so an unrelated server on that port is never reused.
+
 Set the server address on the login screen. The address and an optionally remembered username
 are stored on the device; passwords are never persisted. Language and light/dark preferences are
 device-local and remain selected after a restart.
