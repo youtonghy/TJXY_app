@@ -79,6 +79,7 @@ export default function WebHomeScreen() {
   const fetchControllers = useRef(new Map<string, AbortController>());
   const lastPlayAt = useRef(0);
   const [htmlUri, setHtmlUri] = useState<string>();
+  const [readAccessUri, setReadAccessUri] = useState<string>();
   const [bootstrapScript, setBootstrapScript] = useState('');
   const [loadError, setLoadError] = useState(false);
   const [webError, setWebError] = useState(false);
@@ -113,7 +114,7 @@ export default function WebHomeScreen() {
     let active = true;
     void (async () => {
       try {
-        const saved = await SecureStore.getItemAsync(BRIDGE_SESSION_KEY);
+        const saved = await SecureStore.getItemAsync(BRIDGE_SESSION_KEY).catch(() => null);
         if (saved) {
           try {
             const session = JSON.parse(saved) as BridgeSession;
@@ -124,11 +125,16 @@ export default function WebHomeScreen() {
           }
         }
         const asset = Asset.fromModule(webBundleAsset);
-        await asset.downloadAsync();
+        if (!asset.uri.startsWith('file:')) await asset.downloadAsync();
         const uri = asset.localUri ?? asset.uri;
-        const cachedUri = `${FileSystem.cacheDirectory}tjxy-app.html`;
-        await FileSystem.copyAsync({ from: uri, to: cachedUri });
-        if (active) setHtmlUri(cachedUri);
+        const html = asset.localUri
+          ? `${FileSystem.cacheDirectory}tjxy-app.html`
+          : uri;
+        if (asset.localUri) await FileSystem.copyAsync({ from: uri, to: html });
+        if (active) {
+          setHtmlUri(html);
+          setReadAccessUri(html.slice(0, html.lastIndexOf('/') + 1));
+        }
       } catch (error) {
         console.warn('TJXY bundle loading:', error);
         if (active) setLoadError(true);
@@ -260,7 +266,7 @@ export default function WebHomeScreen() {
       <WebView
         webviewDebuggingEnabled
         allowFileAccess
-        allowingReadAccessToURL={FileSystem.cacheDirectory ?? undefined}
+        allowingReadAccessToURL={readAccessUri ?? FileSystem.cacheDirectory ?? undefined}
         allowsFullscreenVideo={false}
         allowsInlineMediaPlayback
         domStorageEnabled

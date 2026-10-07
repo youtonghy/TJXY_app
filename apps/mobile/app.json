@@ -7,6 +7,7 @@
     "orientation": "default",
     "userInterfaceStyle": "automatic",
     "plugins": [
+      "./plugins/with-ios-scenes.cjs",
       "expo-router",
       "expo-secure-store",
       "expo-video",
@@ -31,6 +32,7 @@
       "package": "com.tjxy.app"
     },
     "ios": {
+      "supportsTablet": true,
       "bundleIdentifier": "com.tjxy.app",
       "infoPlist": {
         "NSCameraUsageDescription": "TJXY 使用相机扫描其他设备上的登录二维码。",
