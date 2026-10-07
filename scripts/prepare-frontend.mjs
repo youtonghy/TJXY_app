@@ -23,7 +23,8 @@ export function prepareFrontend() {
   rmSync(iptv, { recursive: true, force: true });
   cpSync(join(repoRoot, 'packages', 'iptv', 'src'), iptv, { recursive: true });
   // The embedded mobile page has a file origin and navigates with hash routes.
-  patchSource(join(staged, 'src', 'App.tsx'), [
+  const appSource = join(staged, 'src', 'App.tsx');
+  if (!readFileSync(appSource, 'utf8').includes('? HashRouter : BrowserRouter')) patchSource(appSource, [
     ['import { BrowserRouter,', 'import { BrowserRouter, HashRouter,'],
     ['export function App()', "const ShellRouter = import.meta.env.VITE_TJXY_SHELL === 'mobile' ? HashRouter : BrowserRouter;\n\nexport function App()"],
     ['<BrowserRouter>', '<ShellRouter>'],

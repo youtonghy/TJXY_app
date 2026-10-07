@@ -1,11 +1,12 @@
 import { Alert, Button, Chip, Spinner } from '@heroui/react';
-import { ArrowLeft, History, Play, RotateCcw, Tv } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { ArrowLeft, ChevronLeft, ChevronRight, History, ListVideo, Pause, Play, RotateCcw, Tv } from 'lucide-react';
+import { useEffect, useRef, useState, type RefObject } from 'react';
+import { createPortal } from 'react-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useTranslate } from '../../settings/i18n';
 import { WebPlayerSurface } from '../playback/WebPlayerSurface';
 import { isIptvSupportedShell } from './iptvApi';
-import { getIptvChannel, IPTV_LOGO_BASE, iptvChannelGroup, type IptvChannel } from './iptvChannels';
+import { getIptvChannel, IPTV_CHANNELS, IPTV_LOGO_BASE, iptvChannelGroup, type IptvChannel } from './iptvChannels';
 import { loadIptvGuide, loadIptvProgrammes, type IptvProgramme } from './iptvEpg';
 import { attachIptvLive, attachIptvReplay, isIptvJceChannel } from './iptvLive';
 
@@ -21,6 +22,7 @@ export function IptvPlayerPage() {
   const { slug = '' } = useParams();
   const channel = getIptvChannel(slug);
   const supported = isIptvSupportedShell();
+  const tvMode = typeof window !== 'undefined' && Boolean((window as Window & { __TJXY_TV_MODE__?: boolean }).__TJXY_TV_MODE__);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [failure, setFailure] = useState<FailureKind>('resolve');
   const [reloadKey, setReloadKey] = useState(0);
@@ -104,6 +106,10 @@ export function IptvPlayerPage() {
 
   if (!supported) {
     return <UnsupportedNotice channel={channel} />;
+  }
+
+  if (tvMode) {
+    return <TvFullscreen channel={channel} nowPlaying={nowPlaying} replay={replay} state={state} videoRef={videoRef} onReplay={(target) => setReplayTarget(target && { ...target, slug: channel.slug })} onRetry={() => { setState('ready'); setReloadKey((key) => key + 1); }} />;
   }
 
   return (
@@ -207,6 +213,120 @@ export function IptvPlayerPage() {
     </div>
   );
 }
+
+function TvFullscreen({ channel, nowPlaying, replay, state, videoRef, onReplay, onRetry }: {
+  channel: IptvChannel; nowPlaying?: string; replay: (ReplayTarget & { slug: string }) | null;
+  state: PlayerState; videoRef: RefObject<HTMLVideoElement | null>; onReplay: (target: ReplayTarget | null) => void; onRetry: () => void;
+}) {
+  const tr = useTranslate();
+  const navigate = useNavigate();
+  const surface = useRef<HTMLDivElement>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const [controls, setControls] = useState(true);
+  const [panel, setPanel] = useState<'channels' | 'guide' | null>(null);
+  const [group, setGroup] = useState(iptvChannelGroup(channel.slug));
+  const [paused, setPaused] = useState(false);
+  const [buffering, setBuffering] = useState(true);
+  const [activity, setActivity] = useState(0);
+  const showControls = () => { setControls(true); setActivity((value) => value + 1); };
+  const index = IPTV_CHANNELS.findIndex((item) => item.slug === channel.slug);
+  useEffect(() => {
+    setBuffering(true);
+    setPaused(false);
+    showControls();
+  }, [channel.slug]);
+  useEffect(() => {
+    if (!controls || panel || paused || state === 'failed') return;
+    timer.current = setTimeout(() => { setControls(false); surface.current?.focus(); }, 5000);
+    return () => clearTimeout(timer.current);
+  }, [controls, activity, panel, paused, state]);
+  useEffect(() => {
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    surface.current?.focus();
+    return () => { document.body.style.overflow = previous; };
+  }, []);
+  useEffect(() => {
+    if (panel) surface.current?.querySelector<HTMLElement>('[role="dialog"] button[aria-current="true"], [role="dialog"] button')?.focus();
+  }, [panel, group]);
+  useEffect(() => {
+    const key = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' || event.key === 'BrowserBack') {
+        event.preventDefault(); event.stopImmediatePropagation();
+        if (panel) { setPanel(null); showControls(); surface.current?.focus(); }
+        else if (controls) { setControls(false); surface.current?.focus(); }
+        else navigate('/app/iptv');
+        return;
+      }
+      if (panel) { showControls(); return; }
+      if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Enter', ' ', 'MediaPlayPause'].includes(event.key)) return;
+      if (controls && document.activeElement !== surface.current && event.key !== 'MediaPlayPause') { showControls(); return; }
+      event.preventDefault(); event.stopImmediatePropagation();
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+        const next = IPTV_CHANNELS[(index + (event.key === 'ArrowRight' ? 1 : -1) + IPTV_CHANNELS.length) % IPTV_CHANNELS.length];
+        if (next) navigate(`/app/iptv/${next.slug}`, { replace: true });
+      } else if (event.key === 'ArrowUp') setPanel('channels');
+      else if (event.key === 'ArrowDown') { showControls(); surface.current?.querySelector<HTMLButtonElement>('[data-tv-play]')?.focus(); }
+      else if (event.key === 'MediaPlayPause' || controls) {
+        const video = videoRef.current;
+        if (video?.paused) void video.play().catch(() => undefined); else video?.pause();
+        showControls();
+      } else showControls();
+    };
+    window.addEventListener('keydown', key, true);
+    return () => window.removeEventListener('keydown', key, true);
+  }, [panel, controls, index, navigate, videoRef]);
+  const changeChannel = (offset: number) => {
+    const next = IPTV_CHANNELS[(index + offset + IPTV_CHANNELS.length) % IPTV_CHANNELS.length];
+    if (next) navigate(`/app/iptv/${next.slug}`, { replace: true });
+  };
+  return createPortal(
+    <div ref={surface} data-tv-iptv="true" className="tv-iptv" onPointerMove={showControls} onClick={showControls} aria-label={channel.name} tabIndex={-1}>
+      <style>{TV_IPTV_CSS}</style>
+      {state === 'ready' && <video ref={videoRef} className="tv-iptv-video" autoPlay playsInline disablePictureInPicture onWaiting={() => setBuffering(true)} onPlaying={() => { setBuffering(false); setPaused(false); }} onCanPlay={() => setBuffering(false)} onPause={() => setPaused(true)} aria-label={channel.name} />}
+      {(buffering || state === 'failed') && (
+          <div className="tv-iptv-status" role="status">{state === 'failed' ? <><Tv size={40} /><p>{tr('Channel unavailable', '频道暂时无法播放')}</p><Button onPress={onRetry}><RotateCcw size={18} />{tr('Retry', '重试')}</Button></> : <Spinner aria-label={tr('Loading live stream', '正在加载直播')} />}</div>
+        )}
+      <div className="tv-iptv-top" hidden={!controls && !panel}>
+        <button aria-label={tr('Exit live TV', '退出直播')} title={tr('Exit live TV', '退出直播')} onClick={() => navigate('/app/iptv')}><ArrowLeft /></button>
+        <img alt="" src={`${IPTV_LOGO_BASE}/${channel.slug}.png`} onError={(event) => { event.currentTarget.style.visibility = 'hidden'; }} />
+        <span className="tv-iptv-brand">TJXY <span>LIVE TV</span></span>
+        <span className="tv-iptv-quality">{channel.defn.toUpperCase()}</span>
+      </div>
+      <div className="tv-iptv-bottom" hidden={!controls || Boolean(panel)}>
+        <div className="tv-iptv-caption"><span className="tv-iptv-live">{replay ? tr('REPLAY', '回看') : tr('LIVE', '直播')}</span><span>{String(index + 1).padStart(2, '0')}</span></div>
+        <h1>{channel.name}</h1><p>{replay?.programme.title ?? nowPlaying ?? tr('Live television', '现场直播')}</p>
+        <div className="tv-iptv-toolbar">
+          <button aria-label={tr('Previous channel', '上一频道')} title={tr('Previous channel', '上一频道')} onClick={() => changeChannel(-1)}><ChevronLeft /></button>
+          <button data-tv-play aria-label={paused ? tr('Play', '播放') : tr('Pause', '暂停')} title={paused ? tr('Play', '播放') : tr('Pause', '暂停')} onClick={() => { const video = videoRef.current; if (video?.paused) void video.play().catch(() => undefined); else video?.pause(); }}>{paused ? <Play /> : <Pause />}</button>
+          <button aria-label={tr('Next channel', '下一频道')} title={tr('Next channel', '下一频道')} onClick={() => changeChannel(1)}><ChevronRight /></button>
+          <button onClick={() => setPanel('channels')}><Tv />{tr('Channels', '频道')}</button>
+          <button onClick={() => setPanel('guide')}><ListVideo />{tr('Programme guide', '节目单')}</button>
+          {replay && <button onClick={() => onReplay(null)}><RotateCcw />{tr('Back to live', '返回直播')}</button>}
+        </div>
+      </div>
+      {panel && <aside className="tv-iptv-panel" role="dialog" aria-modal="true" aria-label={panel === 'channels' ? tr('Channels', '频道') : tr('Programme guide', '节目单')}>
+        <header><h2>{panel === 'channels' ? tr('Channels', '频道') : channel.name}</h2><button aria-label={tr('Close', '关闭')} onClick={() => { setPanel(null); surface.current?.focus(); }}><ArrowLeft /></button></header>
+        {panel === 'channels' ? <><div className="tv-iptv-groups">{['央视频道', '卫视频道'].map((value) => <button key={value} aria-pressed={group === value} onClick={() => setGroup(value)}>{value === '央视频道' ? tr('CCTV', '央视') : tr('Satellite', '卫视')}</button>)}</div><div className="tv-iptv-list">{IPTV_CHANNELS.filter((item) => iptvChannelGroup(item.slug) === group).map((item) => <button key={item.slug} aria-current={item.slug === channel.slug} onClick={() => { navigate(`/app/iptv/${item.slug}`, { replace: true }); setPanel(null); surface.current?.focus(); }}><span>{String(IPTV_CHANNELS.indexOf(item) + 1).padStart(2, '0')}</span><span>{item.name}</span>{item.slug === channel.slug && <span className="tv-iptv-live">LIVE</span>}</button>)}</div></> : <div className="tv-iptv-guide"><ProgrammeGuide channel={channel} replay={replay} onReplay={(target) => { onReplay(target); setPanel(null); surface.current?.focus(); }} /></div>}
+      </aside>}
+    </div>, document.body,
+  );
+}
+
+const TV_IPTV_CSS = `
+.tv-iptv{position:fixed;inset:0;z-index:10000;background:#000;color:#fff;isolation:isolate;font-size:16px;outline:none!important;box-shadow:none!important}
+.tv-iptv-video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+.tv-iptv [hidden]{display:none!important}.tv-iptv button{display:inline-flex;align-items:center;justify-content:center;gap:10px;min-height:44px;padding:10px 14px;border-radius:6px;background:#ffffff16;color:#fff;flex-shrink:0}
+.tv-iptv button:focus-visible{outline:3px solid #51d4ba!important;outline-offset:3px!important;box-shadow:none!important;background:#ffffff30}
+.tv-iptv button svg{width:22px;height:22px}.tv-iptv-top{position:absolute;top:0;left:0;right:0;display:flex;align-items:center;gap:16px;padding:28px 38px 65px;background:linear-gradient(#000b,transparent)}
+.tv-iptv-top img{width:46px;height:46px;object-fit:contain;background:#ffffffd9;border-radius:6px;padding:3px}.tv-iptv-brand{font-weight:600;font-size:20px}.tv-iptv-brand span{font-size:12px;color:#ffffff80;margin-left:10px}.tv-iptv-quality{margin-left:auto;font-size:13px;color:#ffffffa6;border:1px solid #ffffff40;border-radius:4px;padding:3px 8px}
+.tv-iptv-bottom{position:absolute;bottom:0;left:0;right:0;padding:70px 38px 28px;background:linear-gradient(transparent,#000c 45%,#000e)}
+.tv-iptv-caption{display:flex;align-items:center;gap:12px;font-size:13px;color:#ffffff85}.tv-iptv-live{color:#69e1bd!important;font-size:11px;font-weight:700}.tv-iptv-bottom h1{font-size:28px;line-height:36px;margin-top:9px}.tv-iptv-bottom p{font-size:16px;color:#ffffffab;margin:4px 0 18px}.tv-iptv-toolbar{display:flex;gap:10px;align-items:center}
+.tv-iptv-status{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px}.tv-iptv-panel{position:absolute;right:0;top:0;bottom:0;width:420px;max-width:70%;background:#111816f5;border-left:1px solid #ffffff20;display:flex;flex-direction:column;padding:28px 26px;box-shadow:-30px 0 80px #0005}
+.tv-iptv-panel header{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:20px}.tv-iptv-panel h2{font-size:22px;font-weight:600}.tv-iptv-groups{display:flex;gap:10px;margin-bottom:16px}.tv-iptv-groups button{flex:1}.tv-iptv button[aria-pressed=true]{background:#66dfbc;color:#10201b}.tv-iptv-list,.tv-iptv-guide{overflow-y:auto;min-height:0;flex:1;padding:5px}
+.tv-iptv-list button{width:100%;justify-content:flex-start;margin-bottom:6px;min-height:50px;text-align:left}.tv-iptv-list button>span:first-child{color:#ffffff65;font-size:12px;width:24px}.tv-iptv-list button>span:nth-child(2){flex:1;min-width:0;overflow-wrap:anywhere}.tv-iptv-list button[aria-current=true]{background:#66dfbc20;border-left:3px solid #66dfbc}.tv-iptv-guide{--color-foreground:#fff;--color-muted:#9cafaa;--color-surface:#16231e;--color-surface-secondary:#203229}
+@media(prefers-reduced-motion:reduce){.tv-iptv *{transition:none!important}}
+`;
 
 function ChannelHeading({ channel }: { channel: IptvChannel }) {
   const [logoFailed, setLogoFailed] = useState(false);

@@ -96,7 +96,7 @@ export default function WebHomeScreen() {
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
       if (!webRef.current) return false;
       if (Platform.isTV) {
-        webRef.current.injectJavaScript(`(function(){var popup=document.querySelector('[role="dialog"],[role="listbox"]');if(popup){document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',keyCode:27,bubbles:true}));return;}var path=location.hash.split('?')[0];if(path && !/^#\\/(app\\/?|login\\/?)$/.test(path)){if(history.length>1)history.back();else location.hash='/app/';return;}window.ReactNativeWebView.postMessage(JSON.stringify({kind:'tjxy-tv-back'}));})();true;`);
+        webRef.current.injectJavaScript(`(function(){if(document.querySelector('[data-tv-iptv]')){window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',keyCode:27,bubbles:true}));return;}var popup=document.querySelector('[role="dialog"],[role="listbox"]');if(popup){document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',keyCode:27,bubbles:true}));return;}var path=location.hash.split('?')[0];if(path && !/^#\\/(app\\/?|login\\/?)$/.test(path)){if(history.length>1)history.back();else location.hash='/app/';return;}window.ReactNativeWebView.postMessage(JSON.stringify({kind:'tjxy-tv-back'}));})();true;`);
         return true;
       }
       if (canGoBack.current) {
