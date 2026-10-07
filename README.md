@@ -15,6 +15,7 @@ Package manager: **pnpm** (see `packageManager` in the root `package.json`).
 ## Workspace
 
 - `packages/client-api` — shared fetch client (configurable origin)
+- `packages/iptv` — client-owned IPTV pages, channel tables, device pool, JCE/BK resolution and v9 WebAssembly fallback
 - `apps/mobile` — Expo shell around the bundled `/app` web frontend + native player
 - `apps/desktop` — Electron shell around the same bundled `/app` frontend + a native mpv player helper (`apps/desktop/player`, a standalone Rust binary spawned over stdio)
 
@@ -22,6 +23,9 @@ Both shells bundle the sibling `../TJXY/admin` `/app` UI locally and only load
 runtime data (catalog, account, images, media streams) from the configured
 server at runtime. The admin workspace is selected with `TJXY_ADMIN_DIR` and
 defaults to `../TJXY/admin`.
+
+Client builds create an ignored `.client-frontend` copy and overlay IPTV from this
+repository. They never edit the sibling frontend or add IPTV endpoints to TJXY.
 
 From the repo root:
 
@@ -132,3 +136,33 @@ closes at the end, and revokes its ticket on exit.
 ## Browser `/app`
 
 Unchanged: the web client still uses same-origin `window.location.origin` unless a desktop override is stored.
+
+## IPTV
+
+Both apps bundle the IPTV engine from `packages/iptv/src`. Resolution and playback
+requests go directly from the device to the upstream services through the native
+network bridge; Python, Node HTTP listeners, gateway addresses and server IPTV
+APIs are not required. The v9 channel table contains 64 channels. The device pool
+keeps UHD on its own slot, balances other high-bitrate channels between two slots,
+rotates after six distinct channels per device, and retries session failures with
+a prewarmed standby before using JCE, bkliveinfo and finally the bundled Web WASM
+signing engine. Catchup uses the programme guide and the channel's upstream
+timeshift support, up to seven days.
+
+IPTV plays inside the bundled client with hls.js so signed playlist and segment
+headers remain on the native networking bridge. Desktop and Android use MSE;
+iOS/iPadOS requires a WebView with ManagedMediaSource (iOS 17.1+) and disables
+remote playback for that path. Codec support still depends on the device, so
+UHD/8K decoding is not guaranteed on every platform. The movie player remains
+native. No TJXY access token is attached to IPTV upstream requests.
+
+Update the client tables and WASM bindings from locally saved upstream scripts:
+
+```sh
+pnpm sync:iptv --input /path/to/ysp-live-v9.0.py
+node scripts/sync-iptv-web-engine.mjs /path/to/ysp-engine.js
+pnpm sync:frontend
+```
+
+Run IPTV checks with `pnpm test:iptv`; this stages the frontend, typechecks it and
+runs the IPTV suite using the sibling frontend's locked toolchain.

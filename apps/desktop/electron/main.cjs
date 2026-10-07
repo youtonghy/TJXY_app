@@ -128,7 +128,6 @@ const BLOCKED_REQUEST_HEADERS = new Set([
   'cookie',
   'host',
   'origin',
-  'referer',
 ]);
 
 function filteredHeaders(headers) {
@@ -157,9 +156,17 @@ function installFetchBridge(ses, webContents) {
     fetchControllers.set(id, controller);
     let response;
     try {
-      response = await ses.fetch(parsed.toString(), {
+      const iptv = parsed.hostname.endsWith('.cctv.cn') || parsed.hostname.endsWith('.yangshipin.cn');
+      const requestHeaders = filteredHeaders(headers);
+      if (iptv) {
+        const origin = Object.entries(headers ?? {}).find(([name]) => name.toLowerCase() === 'origin');
+        if (origin) requestHeaders.origin = origin[1];
+      }
+      // IPTV uses public upstream protocol metadata and no persisted TJXY cookie jar.
+      const fetchImpl = iptv ? globalThis.fetch : ses.fetch.bind(ses);
+      response = await fetchImpl(parsed.toString(), {
         method: typeof method === 'string' ? method : 'GET',
-        headers: filteredHeaders(headers),
+        headers: require('./iptv-headers.cjs').iptvHeaders(parsed, requestHeaders),
         body: body ? Buffer.from(body) : undefined,
         signal: controller.signal,
       });
@@ -204,7 +211,7 @@ function installFetchBridge(ses, webContents) {
       statusText: response.statusText,
       headers: responseHeaders,
       redirected: response.redirected,
-      url: parsed.toString(),
+      url: response.url || parsed.toString(),
     };
   });
   ipcMain.on('tjxy:fetch-abort', (event, id) => {

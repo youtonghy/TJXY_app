@@ -13,10 +13,11 @@ import { execFileSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { prepareFrontend } from '../../../scripts/prepare-frontend.mjs';
 
 const desktopDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const repoRoot = resolve(desktopDir, '..', '..');
-const adminDir = resolve(process.env.TJXY_ADMIN_DIR ?? join(repoRoot, '..', 'TJXY', 'admin'));
+const adminDir = process.env.TJXY_SKIP_FRONTEND ? '' : prepareFrontend();
 const distDir = join(desktopDir, 'dist');
 const playerDir = join(desktopDir, 'player');
 const stageDir = join(desktopDir, 'player-bin');
@@ -45,7 +46,7 @@ function run(command, args, options = {}) {
   execFileSync(command, args, { stdio: 'inherit', ...options });
 }
 
-if (!existsSync(join(adminDir, 'package.json'))) {
+if (!process.env.TJXY_SKIP_FRONTEND && !existsSync(join(adminDir, 'package.json'))) {
   console.error(`admin workspace not found at ${adminDir}`);
   console.error('Set TJXY_ADMIN_DIR to the admin/ directory of a TJXY checkout.');
   process.exit(1);

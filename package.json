@@ -6,6 +6,8 @@
     "mobile": "pnpm --filter mobile start",
     "desktop": "pnpm --filter desktop dev",
     "sync:frontend": "node scripts/sync-frontend.mjs",
+    "sync:iptv": "node scripts/sync-iptv-channels.mjs",
+    "test:iptv": "node scripts/check-iptv.mjs",
     "test": "node --experimental-strip-types --test scripts/*.test.mjs && pnpm --filter @tjxy/client-api test"
   }
 }

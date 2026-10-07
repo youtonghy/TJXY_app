@@ -10,10 +10,11 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import electron from 'electron';
 import { findAvailablePort } from './dev-port.mjs';
+import { prepareFrontend } from '../../../scripts/prepare-frontend.mjs';
 
 const desktopDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const repoRoot = resolve(desktopDir, '..', '..');
-const adminDir = resolve(process.env.TJXY_ADMIN_DIR ?? join(repoRoot, '..', 'TJXY', 'admin'));
+const adminDir = prepareFrontend();
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
 if (!existsSync(join(adminDir, 'package.json'))) {

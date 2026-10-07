@@ -124,11 +124,14 @@ window.fetch = function tjxyDesktopFetch(input, init) {
       throw invokeError(error);
     }
     const bodyless = request.method === 'HEAD' || meta.status === 204 || meta.status === 304;
-    return new Response(bodyless ? null : stream, {
+    const response = new Response(bodyless ? null : stream, {
       status: meta.status,
       statusText: meta.statusText,
       headers: meta.headers,
     });
+    Object.defineProperty(response, 'url', { value: meta.url || request.url });
+    Object.defineProperty(response, 'redirected', { value: meta.redirected === true });
+    return response;
   })();
 };
 

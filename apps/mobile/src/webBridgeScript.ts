@@ -210,10 +210,13 @@ export const BRIDGE_SCRIPT = String.raw`
         pending.delete(message.id);
         return;
       }
-      entry.resolve(new Response(new ReadableStream({
+      var bridgedResponse = new Response(new ReadableStream({
         start: function (controller) { entry.controller = controller; },
         cancel: function () { emit({ kind: 'tjxy-fetch-abort', id: message.id }); },
-      }), init));
+      }), init);
+      Object.defineProperty(bridgedResponse, 'url', { value: message.url || '' });
+      Object.defineProperty(bridgedResponse, 'redirected', { value: message.redirected === true });
+      entry.resolve(bridgedResponse);
     } else if (message.phase === 'chunk' && entry.controller) {
       var binary = atob(message.data);
       var bytes = new Uint8Array(binary.length);

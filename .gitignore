@@ -1,4 +1,5 @@
 node_modules
+.client-frontend/
 apps/desktop/player/runtime/*/lib/
 apps/desktop/player/runtime/*/manifest.sha256
 apps/desktop/player-bin/

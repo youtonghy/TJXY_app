@@ -12,9 +12,10 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { prepareFrontend } from './prepare-frontend.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const adminDir = resolve(process.env.TJXY_ADMIN_DIR ?? join(repoRoot, '..', 'TJXY', 'admin'));
+const adminDir = prepareFrontend();
 const desktopOut = join(repoRoot, 'apps', 'desktop', 'dist');
 const mobileOutDir = join(repoRoot, 'apps', 'mobile', 'assets', 'web');
 const mobileBundle = join(mobileOutDir, 'app.html');

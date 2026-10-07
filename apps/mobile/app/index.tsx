@@ -11,6 +11,7 @@ import WebView, { type WebViewMessageEvent } from 'react-native-webview';
 import { BRIDGE_SESSION_KEY, useBridgeSession, type BridgeSession } from '../src/bridgeSession';
 import { parseNativePlayRequest, postToWeb, registerWebView, setPendingPlayRequest } from '../src/playRequest';
 import { BRIDGE_SCRIPT } from '../src/webBridgeScript';
+import { iptvHeaders } from '../src/iptvHeaders';
 import { TvButton as Button } from '../src/ui/TvButton';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -170,7 +171,7 @@ export default function WebHomeScreen() {
     try {
       const response = await expoFetch(message.url!, {
         method: message.method ?? 'GET',
-        headers: message.headers,
+        headers: iptvHeaders(message.url!, message.headers),
         body: message.bodyBase64 ? fromBase64(message.bodyBase64) : (message.body ?? undefined),
         signal: controller.signal,
         credentials: 'omit',
@@ -181,6 +182,7 @@ export default function WebHomeScreen() {
       postToWeb({
         kind: 'tjxy-fetch', id: message.id, phase: 'headers',
         status: response.status, statusText: response.statusText, headers,
+        url: response.url || message.url, redirected: response.redirected,
       });
       // expo/fetch may expose no ReadableStream on Android even though the
       // response has a binary body. arrayBuffer() keeps Blob/image requests
@@ -284,7 +286,7 @@ export default function WebHomeScreen() {
         webviewDebuggingEnabled
         allowFileAccess
         allowingReadAccessToURL={readAccessUri ?? FileSystem.cacheDirectory ?? undefined}
-        allowsFullscreenVideo={false}
+        allowsFullscreenVideo
         allowsInlineMediaPlayback
         domStorageEnabled
         injectedJavaScriptBeforeContentLoaded={`window.__TJXY_TV_MODE__=${Platform.isTV ? 'true' : 'false'};` + bootstrapScript + BRIDGE_SCRIPT}

@@ -1,0 +1,190 @@
+#!/usr/bin/env node
+// Regenerates the IPTV data tables from the upstream ysp-live.py script:
+//   src/client/iptv/iptvChannels.ts       (CHANNELS / TVG_IDS /
+//                                        TIMESHIFT_SUPPORTED / LOGO_BASE,
+//                                        /all.m3u url-tvg EPG addresses and
+//                                        the channels() device-protocol ids)
+//   src/client/iptv/iptvDeviceProfiles.ts (DEVICE_PROFILE_POOL)
+//
+// Usage:
+//   node scripts/sync-iptv-channels.mjs [--input <path-or-url>]
+//
+// The default input is the upstream script URL. The site sits behind a
+// Cloudflare challenge, so automated fetches may be refused; pass --input with
+// a locally saved copy of ysp-live.py in that case.
+import { readFile, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const SOURCE_URL = 'https://garysclub.sharewithyou.dpdns.org/others/ysp-live.py';
+const IPTV_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'packages', 'iptv', 'src');
+const CHANNELS_OUTPUT = join(IPTV_DIR, 'iptvChannels.ts');
+const PROFILES_OUTPUT = join(IPTV_DIR, 'iptvDeviceProfiles.ts');
+
+const args = process.argv.slice(2);
+const inputIndex = args.indexOf('--input');
+const input = inputIndex >= 0 ? args[inputIndex + 1] : SOURCE_URL;
+
+async function loadSource() {
+  if (/^https?:\/\//.test(input)) {
+    const response = await fetch(input);
+    if (!response.ok) throw new Error(`fetch ${input} failed: HTTP ${response.status}`);
+    return response.text();
+  }
+  return readFile(input, 'utf8');
+}
+
+function extractBlock(source, marker) {
+  const name = marker.split('=')[0].trim();
+  const assignment = new RegExp(`\\b${name}\\s*=\\s*`).exec(source);
+  const start = assignment?.index ?? -1;
+  if (start < 0) throw new Error(`marker not found: ${marker}`);
+  let open = start + assignment[0].length;
+  while (open < source.length && /\s/.test(source[open])) open += 1;
+  const openChar = source[open];
+  if (openChar !== '[' && openChar !== '{') throw new Error(`unexpected block start for ${marker}: ${openChar}`);
+  let depth = 0;
+  let quote = '';
+  for (let i = open; i < source.length; i++) {
+    const ch = source[i];
+    if (quote) {
+      if (ch === '\\') i++;
+      else if (ch === quote) quote = '';
+    } else if (ch === "'" || ch === '"') quote = ch;
+    else if (ch === '[' || ch === '{' || ch === '(') depth++;
+    else if (ch === ']' || ch === '}' || ch === ')') {
+      if (--depth === 0) return source.slice(open, i + 1);
+    }
+  }
+  throw new Error(`unterminated block: ${marker}`);
+}
+
+function unescapePy(value) {
+  return value.replace(/\\(.)/g, '$1');
+}
+
+// Upstream mixes single- and double-quoted strings across versions
+// (TIMESHIFT_SUPPORTED in v7.4 is double-quoted).
+const STRING_ITEM = String.raw`['"]((?:[^'"\\]|\\.)*)['"]`;
+
+function parseTupleList(block, arity) {
+  const tuple = new RegExp(`\\(((?:${STRING_ITEM}\\s*,\\s*){${arity - 1}}${STRING_ITEM})\\)`, 'g');
+  const itemPattern = new RegExp(STRING_ITEM, 'g');
+  return [...block.matchAll(tuple)]
+    .map((match) => [...match[1].matchAll(itemPattern)].map((part) => unescapePy(part[1])))
+    .filter((items) => items.length === arity);
+}
+
+function parseStringMap(block) {
+  const pattern = new RegExp(`${STRING_ITEM}\\s*:\\s*${STRING_ITEM}`, 'g');
+  return Object.fromEntries([...block.matchAll(pattern)].map((match) => [unescapePy(match[1]), unescapePy(match[2])]));
+}
+
+function parseStringSet(block) {
+  const pattern = new RegExp(STRING_ITEM, 'g');
+  return [...block.matchAll(pattern)].map((match) => unescapePy(match[1]));
+}
+
+// DEVICE_PROFILE_POOL is a flat list of {'k': 'v', ...} dicts.
+function parseDictList(block) {
+  const entry = /\{([^{}]*)\}/g;
+  const pair = new RegExp(`${STRING_ITEM}\\s*:\\s*${STRING_ITEM}`, 'g');
+  return [...block.matchAll(entry)].map((match) =>
+    Object.fromEntries(
+      [...match[1].matchAll(pair)].map((part) => [unescapePy(part[1]), unescapePy(part[2])]),
+    ),
+  );
+}
+
+const source = await loadSource();
+const channels = parseTupleList(extractBlock(source, 'DEFAULT_CHANNELS = '), 5)
+  .map(([slug, name, sid, pid, defn]) => ({ slug, name, sid, pid, defn }));
+if (!channels.length) throw new Error('no channels parsed from CHANNELS');
+const tvgIds = parseStringMap(extractBlock(source, 'TVG_IDS = '));
+const timeshift = new Set(parseStringSet(extractBlock(source, 'TIMESHIFT_SUPPORTED = ')));
+const logoBase = source.match(/LOGO_BASE\s*=\s*'([^']+)'/)?.[1] ?? '';
+// `def channels()` maps slugs to the device-protocol live ids; a slug absent
+// from the map has no high-bitrate engine path upstream.
+const liveBlock = source.match(/def channels\s*\(\s*\)[^[]*(\[[^\]]*\])/);
+if (!liveBlock) throw new Error('def channels() block not found');
+const liveIds = Object.fromEntries(parseTupleList(liveBlock[1], 2));
+const deviceProfiles = parseDictList(extractBlock(source, 'DEVICE_PROFILE_POOL = '));
+if (!deviceProfiles.length) throw new Error('no profiles parsed from DEVICE_PROFILE_POOL');
+// url-tvg carries a comma-separated list of EPG sources.
+const epgUrls = (source.match(/url-tvg="([^"]+)"/)?.[1] ?? '')
+  .split(',')
+  .map((url) => url.trim())
+  .filter(Boolean);
+
+const lines = [
+  `// Generated by scripts/sync-iptv-channels.mjs from ${SOURCE_URL}`,
+  '// Regenerate with: node scripts/sync-iptv-channels.mjs [--input <saved ysp-live.py>]',
+  '',
+  'export interface IptvChannel {',
+  '  slug: string;',
+  '  name: string;',
+  '  sid: string;',
+  '  pid: string;',
+  '  defn: string;',
+  '  tvgId?: string;',
+  '  timeshift: boolean;',
+  '  liveId?: string;',
+  '}',
+  '',
+  `export const IPTV_LOGO_BASE = ${JSON.stringify(logoBase)};`,
+  `export const IPTV_EPG_URLS: readonly string[] = ${JSON.stringify(epgUrls)};`,
+  '',
+  'export const IPTV_CHANNELS: readonly IptvChannel[] = [',
+  ...channels.map((channel) => {
+    const record = {
+      slug: channel.slug,
+      name: channel.name,
+      sid: channel.sid,
+      pid: channel.pid,
+      defn: channel.defn,
+      ...(tvgIds[channel.slug] ? { tvgId: tvgIds[channel.slug] } : {}),
+      timeshift: timeshift.has(channel.slug),
+      ...(liveIds[channel.slug] ? { liveId: liveIds[channel.slug] } : {}),
+    };
+    return `  ${JSON.stringify(record)},`;
+  }),
+  '];',
+  '',
+  'export function iptvChannelGroup(slug: string): string {',
+  "  return slug.startsWith('cctv') || slug.startsWith('cgtn') ? '央视频道' : '卫视频道';",
+  '}',
+  '',
+  'export function getIptvChannel(slug: string): IptvChannel | undefined {',
+  '  return IPTV_CHANNELS.find((channel) => channel.slug === slug);',
+  '}',
+];
+
+await writeFile(CHANNELS_OUTPUT, `${lines.join('\n')}\n`);
+
+const profileLines = [
+  `// Generated by scripts/sync-iptv-channels.mjs from ${SOURCE_URL}`,
+  '// Regenerate with: node scripts/sync-iptv-channels.mjs [--input <saved ysp-live.py>]',
+  '',
+  '// Spoofed TV build fingerprints the device-protocol session registers',
+  '// under (upstream DEVICE_PROFILE_POOL).',
+  'export interface IptvDeviceProfileTemplate {',
+  '  source: string;',
+  '  brand: string;',
+  '  manufacturer: string;',
+  '  model: string;',
+  '  report_model: string;',
+  '  hardware: string;',
+  '  board: string;',
+  '  version_id: string;',
+  '  screen_param: string;',
+  '  cast_model: string;',
+  '}',
+  '',
+  'export const IPTV_DEVICE_PROFILE_POOL: readonly IptvDeviceProfileTemplate[] = [',
+  ...deviceProfiles.map((profile) => `  ${JSON.stringify(profile)},`),
+  '];',
+];
+await writeFile(PROFILES_OUTPUT, `${profileLines.join('\n')}\n`);
+
+console.log(`wrote ${channels.length} channels -> ${CHANNELS_OUTPUT}`);
+console.log(`wrote ${deviceProfiles.length} device profiles -> ${PROFILES_OUTPUT}`);
