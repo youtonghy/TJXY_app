@@ -110,6 +110,8 @@ if (!liveBlock) throw new Error('def channels() block not found');
 const liveIds = Object.fromEntries(parseTupleList(liveBlock[1], 2));
 const deviceProfiles = parseDictList(extractBlock(source, 'DEVICE_PROFILE_POOL = '));
 if (!deviceProfiles.length) throw new Error('no profiles parsed from DEVICE_PROFILE_POOL');
+const aliases = parseStringMap(extractBlock(source, 'ALIAS_MAP = '));
+if (!Object.keys(aliases).length) throw new Error('no aliases parsed from ALIAS_MAP');
 // url-tvg carries a comma-separated list of EPG sources.
 const epgUrls = (source.match(/url-tvg="([^"]+)"/)?.[1] ?? '')
   .split(',')
@@ -150,12 +152,21 @@ const lines = [
   }),
   '];',
   '',
+  `export const IPTV_CHANNEL_ALIASES: Readonly<Record<string, string>> = ${JSON.stringify(aliases, null, 2)};`,
+  '',
+  'export function canonicalIptvSlug(slug: string): string {',
+  "  const key = slug.trim().replace(/^\\/+|\\/+$/g, '').toLowerCase().replace(/\\.m3u8$/, '');",
+  '  return IPTV_CHANNEL_ALIASES[key] ?? key;',
+  '}',
+  '',
   'export function iptvChannelGroup(slug: string): string {',
-  "  return slug.startsWith('cctv') || slug.startsWith('cgtn') ? '央视频道' : '卫视频道';",
+  '  const canonical = canonicalIptvSlug(slug);',
+  "  return canonical.startsWith('cctv') || canonical.startsWith('cgtn') ? '央视频道' : '卫视频道';",
   '}',
   '',
   'export function getIptvChannel(slug: string): IptvChannel | undefined {',
-  '  return IPTV_CHANNELS.find((channel) => channel.slug === slug);',
+  '  const canonical = canonicalIptvSlug(slug);',
+  '  return IPTV_CHANNELS.find((channel) => channel.slug === canonical);',
   '}',
 ];
 

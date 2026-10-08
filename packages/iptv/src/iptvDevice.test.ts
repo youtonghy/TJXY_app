@@ -54,9 +54,10 @@ function toBodyText(body: BodyInit | null | undefined): string {
   return '';
 }
 
-function makeRouter(options: { live01Status?: number } = {}) {
+function makeRouter(options: { live01Status?: number; cdnStatuses?: number[] } = {}) {
   const calls: RecordedCall[] = [];
   let sessionKey = SESSION_KEY;
+  let cdnIndex = 0;
   const fetchImpl = (url: string, init?: RequestInit): Promise<Response> => {
     const headers = (init?.headers ?? {}) as Record<string, string>;
     calls.push({
@@ -96,7 +97,12 @@ function makeRouter(options: { live01Status?: number } = {}) {
       return respond({ data: { appSecret: aesGcmEncryptB64('vdn-secret', sessionKey, fixedBytes) } });
     }
     if (url.includes('getstream')) return respond({ succeed: '1', url: CDN_URL });
-    if (url === CDN_URL) return Promise.resolve(new Response(CDN_PLAYLIST, { status: 200 }));
+    if (url === CDN_URL) {
+      const status = options.cdnStatuses?.[cdnIndex] ?? 200;
+      if (options.cdnStatuses) cdnIndex += 1;
+      if (status !== 200) return Promise.resolve(new Response('expired', { status }));
+      return Promise.resolve(new Response(CDN_PLAYLIST, { status: 200 }));
+    }
     return Promise.resolve(new Response('not found', { status: 404 }));
   };
   return { calls, fetchImpl, setSessionKey: (key: string) => { sessionKey = key; } };
@@ -199,10 +205,49 @@ describe('iptvDeviceEngine failure handling', () => {
       ['vdn http 500', false],
       ['AES-GCM decrypt failed', true],
       ['missing encrypted session key', true],
+      ['vdn http 401', true],
+      ['vdn http 403', true],
+      ['no usable url', true],
+      ['missing videos', true],
       ['upstream m3u8 http 404', false],
+      ['upstream m3u8 http 403', false],
     ] as const) {
       expect(isSessionInvalidatingError(message), message).toBe(expected);
     }
+  });
+
+  it('re-resolves once when the CDN playlist expires and then cools down', async () => {
+    const nowRef = { t: 1_700_000_000_000 };
+    const recovered = makeRouter({ cdnStatuses: [403, 200] });
+    const engine = makeEngine(recovered, nowRef);
+    const playlist = await engine.fetchPlaylist(channel);
+    expect(playlist).toContain('seg1.ts');
+    expect(recovered.calls.filter((call) => call.url.includes('getstream'))).toHaveLength(2);
+
+    const expired = makeRouter({ cdnStatuses: [403, 403] });
+    const failing = makeEngine(expired, nowRef);
+    await expect(failing.fetchPlaylist(channel)).rejects.toThrow('upstream m3u8 http 403');
+    nowRef.t += 5_000;
+    await expect(failing.fetchPlaylist(channel)).rejects.toThrow('cooldown');
+    expect(expired.calls.filter((call) => call.url === CDN_URL)).toHaveLength(2);
+  });
+
+  it('writes a promoted standby identity onto the slot key', async () => {
+    const nowRef = { t: 1_700_000_000_000 };
+    const router = makeRouter();
+    const storage = makeStorage();
+    const engine = new IptvDeviceEngine({
+      fetchImpl: router.fetchImpl,
+      now: () => nowRef.t,
+      randomBytes: fixedBytes,
+      storage,
+      sleep: () => Promise.resolve(),
+      storageKey: 'tjxy-iptv-v9-standby',
+    });
+    await engine.fetchPlaylist(channel);
+    engine.bindStorageKey('tjxy-iptv-v9-slot-0');
+    expect(storage.map.has('tjxy-iptv-v9-slot-0')).toBe(true);
+    expect(storage.map.get('tjxy-iptv-v9-slot-0')).toBe(storage.map.get('tjxy-iptv-v9-standby'));
   });
 });
 

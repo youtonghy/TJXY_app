@@ -82,10 +82,57 @@ export const IPTV_CHANNELS: readonly IptvChannel[] = [
   {"slug":"guoxue","name":"国学频道","sid":"2029360403","pid":"600213139","defn":"fhd","tvgId":"国学","timeshift":true},
 ];
 
+export const IPTV_CHANNEL_ALIASES: Readonly<Record<string, string>> = {
+  "anhuiws": "ahws",
+  "beijingws": "bjws",
+  "cctv16hd": "cctv16",
+  "cctv5plus": "cctv5p",
+  "cctvdiyijuchang": "cctvdyjc",
+  "cctvfengyunjuchang": "cctvfyjc",
+  "cctvhuaijiujuchang": "cctvhjjc",
+  "cgtnalaboyu": "cgtnar",
+  "cgtneyu": "cgtnru",
+  "cgtnfayu": "cgtnfr",
+  "cgtnwaiyujilu": "cgtndoc",
+  "cgtnxibanyayu": "cgtnes",
+  "chongqingws": "cqws",
+  "dongfangws": "dfws",
+  "fujiandongnanws": "dnws",
+  "guangdongws": "gdws",
+  "guangxiws": "gxws",
+  "guizhouws": "gzws",
+  "hebeiws": "hebws",
+  "heilongjiangws": "hljws",
+  "hubeiws": "hbws",
+  "hunanws": "hnws",
+  "jiangsuws": "jsws",
+  "jiangxiws": "jxws",
+  "jilinws": "jlws",
+  "liaoningws": "lnws",
+  "neimengguws": "nmgws",
+  "ningxiaws": "nxws",
+  "qinghaiws": "qhws",
+  "shandongws": "sdws",
+  "shannxiws": "saxws",
+  "shenzhenws": "szws",
+  "sichuanws": "scws",
+  "tianjinws": "tjws",
+  "xinjiangws": "xjws",
+  "yunnanws": "ynws",
+  "zhejiangws": "zjws"
+};
+
+export function canonicalIptvSlug(slug: string): string {
+  const key = slug.trim().replace(/^\/+|\/+$/g, '').toLowerCase().replace(/\.m3u8$/, '');
+  return IPTV_CHANNEL_ALIASES[key] ?? key;
+}
+
 export function iptvChannelGroup(slug: string): string {
-  return slug.startsWith('cctv') || slug.startsWith('cgtn') ? '央视频道' : '卫视频道';
+  const canonical = canonicalIptvSlug(slug);
+  return canonical.startsWith('cctv') || canonical.startsWith('cgtn') ? '央视频道' : '卫视频道';
 }
 
 export function getIptvChannel(slug: string): IptvChannel | undefined {
-  return IPTV_CHANNELS.find((channel) => channel.slug === slug);
+  const canonical = canonicalIptvSlug(slug);
+  return IPTV_CHANNELS.find((channel) => channel.slug === canonical);
 }

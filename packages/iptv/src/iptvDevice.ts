@@ -448,6 +448,23 @@ export function isSessionInvalidatingError(message: string): boolean {
     || lower.includes('live/v1/02 http 400')
     || lower.includes('live/v1/02 http 401')
     || lower.includes('live/v1/02 http 403')
+    || lower.includes('vdn http 400')
+    || lower.includes('vdn http 401')
+    || lower.includes('vdn http 403')
+    || lower.includes('内部错误')
+    || lower.includes('no usable url')
+    || lower.includes('missing videos')
+  );
+}
+
+/** CDN playlist expiry. Upstream re-resolves once, and 4K then swaps the hot standby before degrading. */
+export function isUpstreamPlaylistExpiry(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes('upstream m3u8 http 400')
+    || lower.includes('upstream m3u8 http 401')
+    || lower.includes('upstream m3u8 http 403')
+    || lower.includes('upstream m3u8 http 404')
   );
 }
 
@@ -490,7 +507,7 @@ export class IptvDeviceEngine {
   private readonly randomBytes: RandomSource;
   private readonly storage: KeyValueStore | null;
   private readonly sleep: (ms: number) => Promise<void>;
-  private readonly storageKey: string;
+  private storageKey: string;
   private deviceState: IptvDeviceState | null = null;
   private appSession: IptvAppSession | null = null;
   private sessionBootstrap: Promise<IptvAppSession> | null = null;
@@ -544,6 +561,16 @@ export class IptvDeviceEngine {
     );
   }
 
+  /**
+   * Persist this engine's identity under another key. The pool calls it when a
+   * hot standby is promoted, so the next launch of that slot does not reuse
+   * the identity that was just burned. Session keys stay in memory.
+   */
+  bindStorageKey(key: string): void {
+    this.storageKey = key;
+    if (this.deviceState) this.saveDeviceState(this.deviceState);
+  }
+
   /** Latest resolved playlist body for a channel, through the device path. */
   async fetchPlaylist(channel: IptvChannel): Promise<string> {
     if (this.isInCooldown(channel.slug)) {
@@ -551,16 +578,35 @@ export class IptvDeviceEngine {
       throw new IptvDeviceError(`channel ${channel.slug} in cooldown: ${failure?.message ?? ''}`);
     }
     try {
-      const entry = await this.ensureEntry(channel);
-      const playlist = await this.fetchEntryPlaylist(entry);
-      return rewritePlaylistUrls(playlist, entry.finalUrl);
+      return await this.loadFreshPlaylist(channel);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.recordFailure(channel.slug, message);
-      if (isSessionInvalidatingError(message)) this.appSession = null;
-      this.lastError = message;
-      throw error instanceof IptvDeviceError ? error : new IptvDeviceError(message);
+      // An expired CDN playlist is re-resolved once on the same device before
+      // the pool decides whether to swap the hot standby.
+      if (isUpstreamPlaylistExpiry(message)) {
+        this.entries.delete(channel.slug);
+        try {
+          return await this.loadFreshPlaylist(channel);
+        } catch (retryError) {
+          throw this.noteFailure(channel.slug, retryError);
+        }
+      }
+      throw this.noteFailure(channel.slug, error);
     }
+  }
+
+  private async loadFreshPlaylist(channel: IptvChannel): Promise<string> {
+    const entry = await this.ensureEntry(channel);
+    const playlist = await this.fetchEntryPlaylist(entry);
+    return rewritePlaylistUrls(playlist, entry.finalUrl);
+  }
+
+  private noteFailure(slug: string, error: unknown): Error {
+    const message = error instanceof Error ? error.message : String(error);
+    this.recordFailure(slug, message);
+    if (isSessionInvalidatingError(message)) this.appSession = null;
+    this.lastError = message;
+    return error instanceof IptvDeviceError ? error : new IptvDeviceError(message);
   }
 
   /** Signed playback headers a segment request should carry. */
